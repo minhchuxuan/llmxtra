@@ -3,6 +3,8 @@ import torch
 from torch.optim.lr_scheduler import StepLR
 from collections import defaultdict
 from models.XTRA import XTRA
+from utils.cross_lingual_refinement import refine_cross_lingual_topics
+from utils.cross_lingual_refine_loss import compute_cross_lingual_refine_loss
 
 
 class Runner:
@@ -25,7 +27,7 @@ class Runner:
 
     def make_lr_scheduler(self, optimizer):
         if self.args.lr_scheduler == 'StepLR':
-            lr_scheduler = StepLR(optimizer, step_size=self.args.lr_step_size, gamma=self.args.lr_gamma, verbose=False)
+            lr_scheduler = StepLR(optimizer, step_size=self.args.lr_step_size, gamma=self.args.lr_gamma)
         else:
             raise NotImplementedError(self.args.lr_scheduler)
 
@@ -44,10 +46,71 @@ class Runner:
             lr_scheduler = self.make_lr_scheduler(optimizer)
 
         for epoch in range(1, self.args.epochs + 1):
+            # Phase 2: Check if we should extract topic words
+            print(self.args.warmStep)
+            if epoch >= self.args.warmStep:
+                # Extract topic words from current beta
+                beta_en, beta_cn = self.model.get_beta()
+                topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn)
+                print(f"Phase 2 - Epoch {epoch}: Extracted topic words")
+                print(f"English topic words: {len(topic_words_en)} topics")
+                print(f"Chinese topic words: {len(topic_words_cn)} topics")
+                
+                # Step 1: Extract top-k words using torch.topk for each topic
+                topk = 15  # Number of top words to keep
+                
+                # For English topics
+                top_values_en, top_indices_en = torch.topk(beta_en, topk, dim=1)
+                # Step 2: Rescale probabilities to sum to 1 using torch.div
+                topic_probas_en = torch.div(top_values_en, top_values_en.sum(dim=1, keepdim=True))
+                
+                # For Chinese topics  
+                top_values_cn, top_indices_cn = torch.topk(beta_cn, topk, dim=1)
+                # Step 2: Rescale probabilities to sum to 1 using torch.div
+                topic_probas_cn = torch.div(top_values_cn, top_values_cn.sum(dim=1, keepdim=True))
+                
+                print(f"Created clean probability distributions over top {topk} words")
+                print(f"English topic_probas shape: {topic_probas_en.shape}")
+                print(f"Chinese topic_probas shape: {topic_probas_cn.shape}")
+                
+                # Cross-lingual topic refinement using Gemini API
+                refined_topics, high_confidence_topics = None, None
+                if hasattr(self.args, 'gemini_api_key') and self.args.gemini_api_key:
+                    print("Starting cross-lingual topic refinement...")
+
+                    vocab_en = self.model.vocab_en
+                    vocab_cn = self.model.vocab_cn
+                    
+                    refined_topics, high_confidence_topics = refine_cross_lingual_topics(
+                        topic_words_en=topic_words_en,
+                        topic_words_cn=topic_words_cn,
+                        topic_probas_en=topic_probas_en,
+                        topic_probas_cn=topic_probas_cn,
+                        top_indices_en=top_indices_en,
+                        top_indices_cn=top_indices_cn,
+                        vocab_en=vocab_en,
+                        vocab_cn=vocab_cn,
+                        api_key=self.args.gemini_api_key,
+                        R=getattr(self.args, 'refinement_rounds', 3),
+                        min_frequency=getattr(self.args, 'min_frequency', 0.1)
+                    )
+                    
+                    print(f"Refined {len(refined_topics)} topics using cross-lingual refinement")
+                    
+                    # Print summary of refined topics
+                    for i, (refined, high_conf) in enumerate(zip(refined_topics, high_confidence_topics)):
+                        print(f"Topic {i}: {len(high_conf['high_confidence_words'])} high-confidence words")
+                        print(f"  Words: {', '.join(high_conf['high_confidence_words'][:5])}...")
+
+                else:
+                    print("No Gemini API key provided, skipping cross-lingual refinement")
+                #TO-do: add loss ot 
 
             sum_loss = 0.
 
             loss_rst_dict = defaultdict(float)
+            print(epoch)
+
 
             self.model.train()
             for batch_data in data_loader:
@@ -65,6 +128,31 @@ class Runner:
                 # Trong Runner.py, train method:
                 rst_dict = self.model(batch_bow_en, batch_bow_cn, document_info, cluster_info)
                 batch_loss = rst_dict['loss']
+                
+                # Add refinement loss if we have refined topics
+                if (epoch >= self.args.warmStep and 
+                    refined_topics is not None and 
+                    high_confidence_topics is not None and
+                    hasattr(self.args, 'refine_weight') and 
+                    self.args.refine_weight > 0):
+                    
+                    try:
+                        refine_loss = compute_cross_lingual_refine_loss(
+                            topic_probas_en=topic_probas_en,
+                            topic_probas_cn=topic_probas_cn,
+                            refined_topics=refined_topics,
+                            high_confidence_topics=high_confidence_topics,
+                            vocab_en=self.model.vocab_en,
+                            vocab_cn=self.model.vocab_cn
+                        )
+                        
+                        if refine_loss > 0:
+                            weighted_refine_loss = self.args.refine_weight * refine_loss
+                            batch_loss = batch_loss + weighted_refine_loss
+                            rst_dict['refine_loss'] = refine_loss
+                            
+                    except Exception as e:
+                        print(f"Warning: Failed to compute refinement loss: {e}")
 
                 for key in rst_dict:
                     if 'loss' in key:
@@ -88,6 +176,7 @@ class Runner:
                 output_log += f' {key}: {loss_rst_dict[key] / num_batch :.3f}'
 
             print(output_log)
+
 
         beta_en, beta_cn = self.model.get_beta()
         beta_en = beta_en.detach().cpu().numpy()
@@ -119,3 +208,34 @@ class Runner:
         theta_en = self.get_theta(dataset.bow_en, lang='en')
         theta_cn = self.get_theta(dataset.bow_cn, lang='cn')
         return theta_en, theta_cn
+
+    def get_topic_words(self, beta_en, beta_cn, topk=15):
+        """Extract top words for each topic from beta matrices"""
+        # Convert CUDA tensors to numpy arrays if necessary
+        if torch.is_tensor(beta_en):
+            beta_en = beta_en.detach().cpu().numpy()
+        if torch.is_tensor(beta_cn):
+            beta_cn = beta_cn.detach().cpu().numpy()
+        
+        topic_words_en = []
+        topic_words_cn = []
+        
+        # Get vocabularies from the model
+        vocab_en = self.model.vocab_en
+        vocab_cn = self.model.vocab_cn
+        
+        # Extract top words for each topic in English
+        for i, topic_dist in enumerate(beta_en):
+            top_word_indices = np.argsort(topic_dist)[:-(topk + 1):-1]
+            topic_words = np.array(vocab_en)[top_word_indices]
+            topic_str = ' '.join(topic_words)
+            topic_words_en.append(topic_str)
+        
+        # Extract top words for each topic in Chinese
+        for i, topic_dist in enumerate(beta_cn):
+            top_word_indices = np.argsort(topic_dist)[:-(topk + 1):-1]
+            topic_words = np.array(vocab_cn)[top_word_indices]
+            topic_str = ' '.join(topic_words)
+            topic_words_cn.append(topic_str)
+            
+        return topic_words_en, topic_words_cn

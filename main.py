@@ -29,11 +29,38 @@ def parse_args():
     parser.add_argument('--metric', type=str, default='npmi')
 
     parser.add_argument('--device', type=int, default=0, help='CUDA device index to use')
+
+    # llm
+    parser.add_argument('--warmStep', default=0, type=int)
+    parser.add_argument('--llm_itl', action='store_true')
+    parser.add_argument('--llm_step', type=int, default=3)  # the number of epochs for llm refine
+    parser.add_argument('--refine_weight', type=float, default=200)
+    parser.add_argument('--instruction', type=str, default='refine_labelTokenProbs',
+                        choices=['refine_labelTokenProbs', 'refine_wordIntrusion'])
+    parser.add_argument('--inference_bs', type=int, default=5)
+    parser.add_argument('--max_new_tokens', type=int, default=300)
     
+    # Cross-lingual refinement with Gemini API
+    parser.add_argument('--gemini_api_key', type=str, default=None,
+                        help='Google Gemini API key for cross-lingual topic refinement')
+    parser.add_argument('--refinement_rounds', type=int, default=3,
+                        help='Number of self-consistent refinement rounds (R)')
+    parser.add_argument('--min_frequency', type=float, default=0.1,
+                        help='Minimum frequency threshold for high-confidence words')
+    parser.add_argument('--refine_weight', type=float, default=0.0,
+                        help='Weight for refinement loss (0 disables refinement loss)')
+
+
+
     # Add missing arguments used in the code
     parser.add_argument('--wandb_prj', type=str, default='Camera-ready', help='Wandb project name')
 
     args = parser.parse_args()
+    
+    # Try to get API key from environment variable if not provided via command line
+    if args.gemini_api_key is None:
+        args.gemini_api_key = os.getenv('GEMINI_API_KEY')
+
     return args
 
 
@@ -48,7 +75,7 @@ def main():
     args = parse_args()
 
     args = file_utils.update_args(args, f'./configs/model/{args.model}.yaml')
-
+    args.warmStep = args.epochs - args.llm_step
     args = file_utils.update_args(args, f'./configs/dataset/{args.dataset}.yaml')
 
     if args.lang2 == "ja":
