@@ -30,48 +30,62 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
     ot_dists = torch.zeros(size=(num_topics,)).cuda()
     
     for i in range(num_topics):
-        if i < len(high_confidence_topics) and high_confidence_topics[i]['high_confidence_words']:
-            # Get current topic words and probabilities
+        if (i < len(high_confidence_topics) and 
+            (high_confidence_topics[i]['high_confidence_words_en'] or 
+             high_confidence_topics[i]['high_confidence_words_cn'])):
+            # Get current topic words and probabilities  
             en_indices = torch.topk(topic_probas_en[i], k=15).indices
             en_words = [vocab_en[idx] for idx in en_indices.cpu().numpy()]
-            en_probs = topic_probas_en[i].to(torch.float64)
+            en_probs = topic_probas_en[i][:len(en_words)].to(torch.float64)
             
-            cn_indices = torch.topk(topic_probas_cn[i], k=15).indices
+            cn_indices = torch.topk(topic_probas_cn[i], k=15).indices 
             cn_words = [vocab_cn[idx] for idx in cn_indices.cpu().numpy()]
-            cn_probs = topic_probas_cn[i].to(torch.float64)
+            cn_probs = topic_probas_cn[i][:len(cn_words)].to(torch.float64)
             
-            current_words = en_words + cn_words
-            current_masses = torch.cat([en_probs, cn_probs])
+            # Create proper combined distribution (avoid double counting, normalize to sum=1)
+            current_word_prob = {}
+            lang_weight = 0.5  # Equal weight for both languages
             
-            # Get refined words and frequencies
-            refined_words = high_confidence_topics[i]['high_confidence_words']
-            refined_freqs = [high_confidence_topics[i]['word_frequencies'][word] 
-                           for word in refined_words]
+            for word, prob in zip(en_words, en_probs):
+                current_word_prob[word] = current_word_prob.get(word, 0) + prob.item() * lang_weight
+            for word, prob in zip(cn_words, cn_probs):
+                current_word_prob[word] = current_word_prob.get(word, 0) + prob.item() * lang_weight
             
-            if len(refined_words) > 0:
+            # Get refined words and normalize frequencies to probabilities
+            refined_words_en = high_confidence_topics[i]['high_confidence_words_en']
+            refined_words_cn = high_confidence_topics[i]['high_confidence_words_cn']
+            freq_dict_en = high_confidence_topics[i]['word_frequencies_en']
+            freq_dict_cn = high_confidence_topics[i]['word_frequencies_cn']
+            
+            # Normalize frequencies to create proper probability distribution
+            total_freq = sum(freq_dict_en.values()) + sum(freq_dict_cn.values())
+            refined_word_prob = {}
+            
+            if total_freq > 0:
+                for word, freq in freq_dict_en.items():
+                    refined_word_prob[word] = refined_word_prob.get(word, 0) + (freq / total_freq) * lang_weight
+                for word, freq in freq_dict_cn.items():
+                    refined_word_prob[word] = refined_word_prob.get(word, 0) + (freq / total_freq) * lang_weight
+            
+            if len(refined_word_prob) > 0:
                 # Create union vocabulary for proper alignment
-                all_words = list(set(current_words + refined_words))
+                all_words = list(set(current_word_prob.keys()) | set(refined_word_prob.keys()))
                 vocab_size = len(all_words)
                 
                 # Create aligned distributions
                 current_aligned = torch.zeros(vocab_size, dtype=torch.float64).cuda()
                 refined_aligned = torch.zeros(vocab_size, dtype=torch.float64).cuda()
                 
-                # Map current words to aligned distribution
-                for word, prob in zip(current_words, current_masses):
-                    if word in all_words:
-                        idx = all_words.index(word)
-                        current_aligned[idx] += prob.item()
+                # Map distributions to aligned vectors
+                for idx, word in enumerate(all_words):
+                    current_aligned[idx] = current_word_prob.get(word, 0.0)
+                    refined_aligned[idx] = refined_word_prob.get(word, 0.0)
                 
-                # Map refined words to aligned distribution
-                for word, freq in zip(refined_words, refined_freqs):
-                    if word in all_words:
-                        idx = all_words.index(word)
-                        refined_aligned[idx] += freq
-                
-                # Normalize to probability distributions
-                current_aligned = current_aligned / current_aligned.sum()
-                refined_aligned = refined_aligned / refined_aligned.sum()
+                # Ensure proper normalization (they should already sum to ~1, but numerical safety)
+                if current_aligned.sum() > 0:
+                    current_aligned = current_aligned / current_aligned.sum()
+                if refined_aligned.sum() > 0:
+                    refined_aligned = refined_aligned / refined_aligned.sum()
                 
                 # Compute cost matrix and OT distance
                 cost_M = compute_embedding_cost_matrix(all_words, all_words, embedding_model)
@@ -85,9 +99,13 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
     # Compute topic weights based on refinement confidence
     topic_weights = torch.zeros(size=(num_topics,)).cuda()
     for i in range(num_topics):
-        if i < len(refined_topics) and refined_topics[i]['total_refined_words'] > 0:
-            confidence = refined_topics[i]['refinement_rounds_completed'] / refined_topics[i]['num_refinements']
-            topic_weights[i] = torch.tensor(confidence).cuda()
+        if i < len(refined_topics):
+            total_words = refined_topics[i]['total_refined_words_en'] + refined_topics[i]['total_refined_words_cn']
+            if total_words > 0:
+                confidence = refined_topics[i]['refinement_rounds_completed'] / refined_topics[i]['num_refinements']
+                topic_weights[i] = torch.tensor(confidence).cuda()
+            else:
+                topic_weights[i] = 0.0
         else:
             topic_weights[i] = 0.0
     

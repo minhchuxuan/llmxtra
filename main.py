@@ -45,7 +45,7 @@ def parse_args():
                         help='Google Gemini API key for cross-lingual topic refinement')
     parser.add_argument('--refinement_rounds', type=int, default=3,
                         help='Number of self-consistent refinement rounds (R)')
-    parser.add_argument('--min_frequency', type=float, default=0.1,
+    parser.add_argument('--min_frequency', type=float, default=0.01,
                         help='Minimum frequency threshold for high-confidence words')
     parser.add_argument('--refine_weight', type=float, default=0.0,
                         help='Weight for refinement loss (0 disables refinement loss)')

@@ -85,15 +85,17 @@ class Runner:
                         topic_probas_cn=topic_probas_cn,
                         api_key=self.args.gemini_api_key,
                         R=getattr(self.args, 'refinement_rounds', 3),
-                        min_frequency=getattr(self.args, 'min_frequency', 0.1)
+                        min_frequency=getattr(self.args, 'min_frequency', 0.01)  # Lower threshold: 1% instead of 10%
                     )
                     
                     print(f"Refined {len(refined_topics)} topics using cross-lingual refinement")
                     
                     # Print summary of refined topics
                     for i, (refined, high_conf) in enumerate(zip(refined_topics, high_confidence_topics)):
-                        print(f"Topic {i}: {len(high_conf['high_confidence_words'])} high-confidence words")
-                        print(f"  Words: {', '.join(high_conf['high_confidence_words'][:5])}...")
+                        total_words = len(high_conf['high_confidence_words_en']) + len(high_conf['high_confidence_words_cn'])
+                        print(f"Topic {i}: {total_words} high-confidence words ({len(high_conf['high_confidence_words_en'])} EN, {len(high_conf['high_confidence_words_cn'])} CN)")
+                        sample_words = high_conf['high_confidence_words_en'][:3] + high_conf['high_confidence_words_cn'][:3]
+                        print(f"  Sample words: {', '.join(sample_words[:5])}...")
 
                 else:
                     print("No Gemini API key provided, skipping cross-lingual refinement")
