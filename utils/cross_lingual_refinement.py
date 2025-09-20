@@ -25,66 +25,54 @@ class CrossLingualTopicRefiner:
                                    topic_words_en: List[str], 
                                    topic_words_cn: List[str],
                                    topic_probas_en: torch.Tensor,
-                                   topic_probas_cn: torch.Tensor,
-                                   top_indices_en: torch.Tensor,
-                                   top_indices_cn: torch.Tensor,
-                                   vocab_en: List[str],
-                                   vocab_cn: List[str]) -> List[Dict]:
+                                   topic_probas_cn: torch.Tensor) -> List[Dict]:
         """
         Cross-Lingual Topic Word Pooling
         
         For each topic k, produces:
-        W_k = w^{(A)}_k ∪ w^{(B)}_k (30 words total: 15 from each language)
+        W_k = w^{(A)}_k ∪ w^{(B)}_k (combined words from both languages)
         T_k = t^{(A)}_k ∪ t^{(B)}_k (corresponding probability distributions)
         
         Args:
-            topic_words_en: List of English topic word strings (each has 15 words)
-            topic_words_cn: List of Chinese topic word strings (each has 15 words)
+            topic_words_en: List of English topic word strings (each has up to 15 words)
+            topic_words_cn: List of Chinese topic word strings (each has up to 15 words)
             topic_probas_en: English topic probability distributions [num_topics, 15]
             topic_probas_cn: Chinese topic probability distributions [num_topics, 15]
-            top_indices_en: English word indices [num_topics, 15]
-            top_indices_cn: Chinese word indices [num_topics, 15]
-            vocab_en: English vocabulary
-            vocab_cn: Chinese vocabulary
             
         Returns:
-            List of pooled topics with combined words and probabilities (30 words per topic)
+            List of pooled topics with combined words and probabilities
         """
         pooled_topics = []
         num_topics = len(topic_words_en)
         
         for k in range(num_topics):
-            # Extract words for topic k (15 words from each language)
-            en_words = topic_words_en[k].split()  # Should be 15 words
-            cn_words = topic_words_cn[k].split()  # Should be 15 words
+            # Extract words for topic k
+            en_words = topic_words_en[k].split()[:15]
+            cn_words = topic_words_cn[k].split()[:15]
             
-            # Ensure we have exactly 15 words from each language
-            en_words = en_words[:15] if len(en_words) >= 15 else en_words
-            cn_words = cn_words[:15] if len(cn_words) >= 15 else cn_words
+            # Match probabilities to actual word count
+            en_probs = topic_probas_en[k].detach().cpu().numpy()[:len(en_words)]
+            cn_probs = topic_probas_cn[k].detach().cpu().numpy()[:len(cn_words)]
             
-            # Get probabilities for topic k (15 probabilities from each language)
-            en_probs = topic_probas_en[k].detach().cpu().numpy()[:15]
-            cn_probs = topic_probas_cn[k].detach().cpu().numpy()[:15]
+            # Create combined word set and probabilities
+            combined_words = en_words + cn_words
+            combined_probs = np.concatenate([en_probs, cn_probs])
             
-            # Create combined word set W_k = w^{(A)}_k ∪ w^{(B)}_k (30 words total)
-            combined_words = en_words + cn_words  # 15 + 15 = 30 words
-            combined_probs = np.concatenate([en_probs, cn_probs])  # 15 + 15 = 30 probabilities
-            
-            # Create topic-word distribution T_k = t^{(A)}_k ∪ t^{(B)}_k
+            # Handle duplicate words by accumulating probabilities
             word_prob_dict = {}
             for word, prob in zip(combined_words, combined_probs):
-                word_prob_dict[word] = float(prob)
+                word_prob_dict[word] = word_prob_dict.get(word, 0.0) + float(prob)
             
             pooled_topic = {
                 'topic_id': k,
-                'words': combined_words,  # 30 words total
-                'probabilities': combined_probs.tolist(),  # 30 probabilities
+                'words': combined_words,
+                'probabilities': combined_probs.tolist(),
                 'word_prob_dict': word_prob_dict,
-                'en_words': en_words,  # 15 English words
-                'cn_words': cn_words,  # 15 Chinese words
-                'en_probs': en_probs.tolist(),  # 15 English probabilities
-                'cn_probs': cn_probs.tolist(),  # 15 Chinese probabilities
-                'total_words': len(combined_words)  # Should be 30
+                'en_words': en_words,
+                'cn_words': cn_words,
+                'en_probs': en_probs.tolist(),
+                'cn_probs': cn_probs.tolist(),
+                'total_words': len(combined_words)
             }
             
             pooled_topics.append(pooled_topic)
@@ -106,14 +94,14 @@ class CrossLingualTopicRefiner:
         words_str = ", ".join(words)
         
         prompt = f"""
-Given the following cross-lingual topic words (15 words from {lang_a} and 15 words from {lang_b}, total 30 words), please refine and improve this topic by:
+Given the following cross-lingual topic words from {lang_a} and {lang_b}, please refine and improve this topic by:
 
 1. Identifying the main theme that connects these words across both languages
 2. Removing any irrelevant or noisy words that don't fit the coherent theme
 3. Adding relevant words that strengthen the topic coherence in both languages
 4. Ensuring the refined word list maintains good cross-lingual representation
 
-Original words (30 total): {words_str}
+Original words: {words_str}
 
 Please provide your response in the following JSON format:
 {{
@@ -123,7 +111,7 @@ Please provide your response in the following JSON format:
     "added_words": ["added1", "added2", ...]
 }}
 
-Keep the refined word list exactly 30 words in total, focusing on the most coherent and representative words from both languages.
+Focus on the most coherent and representative words from both languages.
 """
         return prompt
     
@@ -291,10 +279,6 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
                                 topic_words_cn: List[str], 
                                 topic_probas_en: torch.Tensor,
                                 topic_probas_cn: torch.Tensor,
-                                top_indices_en: torch.Tensor,
-                                top_indices_cn: torch.Tensor,
-                                vocab_en: List[str],
-                                vocab_cn: List[str],
                                 api_key: str,
                                 R: int = 3,
                                 min_frequency: float = 0.1) -> Tuple[List[Dict], List[Dict]]:
@@ -302,19 +286,15 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
     Main function to perform cross-lingual topic refinement
     
     Mathematical Framework:
-    1. Cross-lingual pooling: W_k = w^{(A)}_k ∪ w^{(B)}_k (30 words: 15 English + 15 Chinese)
+    1. Cross-lingual pooling: W_k = w^{(A)}_k ∪ w^{(B)}_k (combined words from both languages)
     2. Self-consistent refinement: W'_k = ⋃_{r=1}^R w^{(r)}_k
     3. Frequency-based confidence: Ũ_k(j) = Count(w_j ∈ W'_k) / Σ_{j'} Count(w_{j'} ∈ W'_k)
     
     Args:
-        topic_words_en: English topic words (each topic has 15 words)
-        topic_words_cn: Chinese topic words (each topic has 15 words)
+        topic_words_en: English topic words (each topic has up to 15 words)
+        topic_words_cn: Chinese topic words (each topic has up to 15 words)
         topic_probas_en: English topic probabilities [num_topics, 15]
         topic_probas_cn: Chinese topic probabilities [num_topics, 15]
-        top_indices_en: English word indices [num_topics, 15]
-        top_indices_cn: Chinese word indices [num_topics, 15]
-        vocab_en: English vocabulary
-        vocab_cn: Chinese vocabulary
         api_key: Gemini API key
         R: Number of refinement rounds
         min_frequency: Minimum frequency threshold for high-confidence words
@@ -324,15 +304,13 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
     """
     refiner = CrossLingualTopicRefiner(api_key)
     
-    # Step 1: Cross-lingual word pooling - W_k = w^{(A)}_k ∪ w^{(B)}_k (30 words per topic)
+    # Step 1: Cross-lingual word pooling - W_k = w^{(A)}_k ∪ w^{(B)}_k
     pooled_topics = refiner.cross_lingual_word_pooling(
         topic_words_en, topic_words_cn,
-        topic_probas_en, topic_probas_cn,
-        top_indices_en, top_indices_cn,
-        vocab_en, vocab_cn
+        topic_probas_en, topic_probas_cn
     )
     
-    print(f"Created pooled topics: {len(pooled_topics)} topics, each with 30 words (15 EN + 15 CN)")
+    print(f"Created pooled topics: {len(pooled_topics)} topics with combined cross-lingual words")
     
     # Step 2: Self-consistent refinement - W'_k = ⋃_{r=1}^R w^{(r)}_k
     refined_topics = refiner.self_consistent_refinement(pooled_topics, R=R)

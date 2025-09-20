@@ -77,19 +77,12 @@ class Runner:
                 refined_topics, high_confidence_topics = None, None
                 if hasattr(self.args, 'gemini_api_key') and self.args.gemini_api_key:
                     print("Starting cross-lingual topic refinement...")
-
-                    vocab_en = self.model.vocab_en
-                    vocab_cn = self.model.vocab_cn
                     
                     refined_topics, high_confidence_topics = refine_cross_lingual_topics(
                         topic_words_en=topic_words_en,
                         topic_words_cn=topic_words_cn,
                         topic_probas_en=topic_probas_en,
                         topic_probas_cn=topic_probas_cn,
-                        top_indices_en=top_indices_en,
-                        top_indices_cn=top_indices_cn,
-                        vocab_en=vocab_en,
-                        vocab_cn=vocab_cn,
                         api_key=self.args.gemini_api_key,
                         R=getattr(self.args, 'refinement_rounds', 3),
                         min_frequency=getattr(self.args, 'min_frequency', 0.1)
