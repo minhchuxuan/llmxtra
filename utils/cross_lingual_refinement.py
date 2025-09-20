@@ -79,52 +79,82 @@ class CrossLingualTopicRefiner:
             
         return pooled_topics
     
-    def create_refinement_prompt(self, words: List[str], lang_a: str = "English", lang_b: str = "Chinese") -> str:
+    def create_refinement_prompt(self, topic_words_en: List[str], topic_words_cn: List[str]) -> str:
         """
-        Create prompt for topic refinement
-        
+        Create prompt for refining all topics at once
+
         Args:
-            words: Combined list of words from both languages (30 words total: 15 from each language)
-            lang_a: First language name
-            lang_b: Second language name
-            
+            topic_words_en: List of English topic word strings (each with 50 words)
+            topic_words_cn: List of Chinese topic word strings (each with 50 words)
+
         Returns:
-            Formatted prompt string
+            Formatted prompt string for all topics
         """
-        words_str = ", ".join(words)
-        
-        prompt = f"""
-Given the following cross-lingual topic words from {lang_a} and {lang_b}, please refine and improve this topic by:
+        num_topics = len(topic_words_en)
 
-1. Identifying the main theme that connects these words across both languages
-2. Removing any irrelevant or noisy words that don't fit the coherent theme
-3. Adding relevant words that strengthen the topic coherence in both languages
-4. Ensuring the refined word list maintains good cross-lingual representation
+        prompt = f"""Given the following cross-lingual topic words from English and Chinese for {num_topics} topics, please refine and improve each topic by:
 
-Original words: {words_str}
+1. For each topic, the top 15 words from each language are the most probable (first 15 in the list).
+2. Identify the main theme that connects these words across both languages for each topic
+3. Remove any irrelevant or noisy words from the top 15 that don't fit the coherent theme
+4. Add relevant words from the full top 50 list that strengthen the topic coherence
+5. Ensure each refined topic has exactly 15 words per language that maintain good cross-lingual representation
 
-Please provide your response in the following JSON format:
+"""
+
+        # Add all topics to the prompt
+        for k in range(num_topics):
+            top_50_en = topic_words_en[k].split()
+            top_50_cn = topic_words_cn[k].split()
+
+            words_en_str = ", ".join(top_50_en)
+            words_cn_str = ", ".join(top_50_cn)
+
+            prompt += f"""
+Topic {k}:
+English top 50 words: {words_en_str}
+Chinese top 50 words: {words_cn_str}
+"""
+
+        prompt += f"""
+
+Please provide your response in the following JSON format for ALL {num_topics} topics:
 {{
-    "topic_theme": "brief description of the main topic theme",
-    "refined_words": ["word1", "word2", "word3", ...],
-    "removed_words": ["removed1", "removed2", ...],
-    "added_words": ["added1", "added2", ...]
+    "topics": [
+        {{
+            "topic_id": 0,
+            "topic_theme": "brief description of topic 0 theme",
+            "refined_words_en": ["word1", "word2", ..., "word15"],
+            "refined_words_cn": ["word1", "word2", ..., "word15"],
+            "removed_words": ["removed1", "removed2", ...],
+            "added_words": ["added1", "added2", ...]
+        }},
+        {{
+            "topic_id": 1,
+            "topic_theme": "brief description of topic 1 theme",
+            "refined_words_en": ["word1", "word2", ..., "word15"],
+            "refined_words_cn": ["word1", "word2", ..., "word15"],
+            "removed_words": ["removed1", "removed2", ...],
+            "added_words": ["added1", "added2", ...]
+        }},
+        // ... continue for all {num_topics} topics
+    ]
 }}
 
-Focus on the most coherent and representative words from both languages.
+Focus on the most coherent and representative words from both languages for each topic.
 """
         return prompt
     
-    def call_gemini_api(self, prompt: str, max_retries: int = 3) -> Dict:
+    def call_gemini_api(self, prompt: str, max_retries: int = 3) -> List[Dict]:
         """
-        Call Gemini API with retry logic
+        Call Gemini API with retry logic for multiple topics
         
         Args:
-            prompt: Input prompt
+            prompt: Input prompt containing all topics
             max_retries: Maximum number of retries
             
         Returns:
-            Parsed response dictionary
+            List of parsed response dictionaries for each topic
         """
         for attempt in range(max_retries):
             try:
@@ -138,10 +168,13 @@ Focus on the most coherent and representative words from both languages.
                 if json_match:
                     json_str = json_match.group()
                     result = json.loads(json_str)
-                    return result
-                else:
-                    print(f"No valid JSON found in response: {response_text}")
                     
+                    # Check if result has the expected structure
+                    if 'topics' in result and isinstance(result['topics'], list):
+                        return result['topics']
+                    else:
+                        print(f"Unexpected JSON structure: {result}")
+                        
             except Exception as e:
                 print(f"API call attempt {attempt + 1} failed: {e}")
                 if attempt < max_retries - 1:
@@ -150,92 +183,107 @@ Focus on the most coherent and representative words from both languages.
         return None
     
     def self_consistent_refinement(self, 
-                                   pooled_topics: List[Dict], 
-                                   R: int = 3,
-                                   lang_a: str = "English", 
-                                   lang_b: str = "Chinese") -> List[Dict]:
+                                   topic_words_en: List[str], 
+                                   topic_words_cn: List[str], 
+                                   R: int = 3) -> List[Dict]:
         """
-        Self-Consistent Refinement
+        Self-Consistent Refinement for all topics at once
         
-        Performs R refinements and aggregates results:
-        W'_k = ⋃_{r=1}^R w^{(r)}_k
-        
-        Then creates normalized frequency distribution:
-        Ũ_k(j) = Count(w_j ∈ W'_k) / Σ_{j'} Count(w_{j'} ∈ W'_k)
+        Performs R refinements for all topics in each round.
         
         Args:
-            pooled_topics: List of pooled topic dictionaries (each with 30 words)
+            topic_words_en: List of English topic word strings (each with 50 words)
+            topic_words_cn: List of Chinese topic word strings (each with 50 words)
             R: Number of refinement rounds
-            lang_a: First language name
-            lang_b: Second language name
             
         Returns:
             List of refined topics with frequency-based confidence scores
         """
+        num_topics = len(topic_words_en)
         refined_topics = []
         
-        for topic_data in pooled_topics:
-            topic_id = topic_data['topic_id']
-            words = topic_data['words']  # 30 words (15 English + 15 Chinese)
-            total_words = topic_data['total_words']  # Should be 30
-            
-            print(f"Refining topic {topic_id} with {R} rounds (starting with {total_words} words)...")
-            
-            # Collect refined words from R refinements
-            all_refined_words = []  # Will collect words from all R refinement rounds
-            refinement_details = []
-            
-            for r in range(R):
-                print(f"  Refinement round {r+1}/{R}")
-                
-                prompt = self.create_refinement_prompt(words, lang_a, lang_b)
-                result = self.call_gemini_api(prompt)
-                
-                if result and 'refined_words' in result:
-                    refined_words_r = result['refined_words']  # w^{(r)}_k for round r
-                    all_refined_words.extend(refined_words_r)
-                    refinement_details.append(result)
-                    print(f"    Got {len(refined_words_r)} refined words in round {r+1}")
-                else:
-                    print(f"    Failed to get valid response for round {r+1}")
-            
-            # Aggregate into pooled refined set W'_k = ⋃_{r=1}^R w^{(r)}_k
-            word_counts = Counter(all_refined_words)
-            
-            # Create normalized frequency distribution Ũ_k(j)
-            total_count = sum(word_counts.values())
-            if total_count > 0:
-                normalized_freq_dist = {
-                    word: count / total_count 
-                    for word, count in word_counts.items()
-                }
-            else:
-                normalized_freq_dist = {}
-            
-            # Sort words by frequency (confidence) - higher frequency = higher confidence
-            sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
-            
-            refined_topic = {
-                'topic_id': topic_id,
-                'original_words': words,  # 30 original words
-                'original_word_count': total_words,  # 30
-                'refined_word_counts': dict(word_counts),  # Count(w_j ∈ W'_k)
-                'normalized_freq_dist': normalized_freq_dist,  # Ũ_k(j)
-                'sorted_refined_words': sorted_words,  # Sorted by frequency
-                'refinement_details': refinement_details,
+        # Initialize collections for all topics
+        for k in range(num_topics):
+            refined_topics.append({
+                'topic_id': k,
+                'original_top_50_en': topic_words_en[k].split(),
+                'original_top_50_cn': topic_words_cn[k].split(),
+                'refined_word_counts_en': {},
+                'refined_word_counts_cn': {},
+                'normalized_freq_dist_en': {},
+                'normalized_freq_dist_cn': {},
+                'refinement_details': [],
                 'num_refinements': R,
-                'total_refined_words': len(word_counts),
-                'refinement_rounds_completed': len(refinement_details)
-            }
+                'total_refined_words_en': 0,
+                'total_refined_words_cn': 0,
+                'refinement_rounds_completed': 0
+            })
+        
+        print(f"Starting refinement for {num_topics} topics with {R} rounds...")
+        
+        for r in range(R):
+            print(f"Refinement round {r+1}/{R} for all topics...")
             
-            refined_topics.append(refined_topic)
+            # Create prompt for all topics
+            prompt = self.create_refinement_prompt(topic_words_en, topic_words_cn)
+            result = self.call_gemini_api(prompt)
             
+            if result and isinstance(result, list):
+                print(f"Round {r+1}: Got refinement results for {len(result)} topics")
+                
+                # Process results for each topic
+                for topic_result in result:
+                    if isinstance(topic_result, dict) and 'topic_id' in topic_result:
+                        topic_id = topic_result['topic_id']
+                        
+                        if topic_id < num_topics:
+                            # Extract refined words
+                            refined_words_en = topic_result.get('refined_words_en', [])
+                            refined_words_cn = topic_result.get('refined_words_cn', [])
+                            
+                            # Update word counts
+                            for word in refined_words_en:
+                                refined_topics[topic_id]['refined_word_counts_en'][word] = \
+                                    refined_topics[topic_id]['refined_word_counts_en'].get(word, 0) + 1
+                            
+                            for word in refined_words_cn:
+                                refined_topics[topic_id]['refined_word_counts_cn'][word] = \
+                                    refined_topics[topic_id]['refined_word_counts_cn'].get(word, 0) + 1
+                            
+                            # Store refinement details
+                            refined_topics[topic_id]['refinement_details'].append(topic_result)
+                            refined_topics[topic_id]['refinement_rounds_completed'] += 1
+            else:
+                print(f"Round {r+1}: Failed to get valid results")
+        
+        # Calculate final statistics for each topic
+        for k in range(num_topics):
+            # English words
+            word_counts_en = refined_topics[k]['refined_word_counts_en']
+            total_count_en = sum(word_counts_en.values())
+            if total_count_en > 0:
+                refined_topics[k]['normalized_freq_dist_en'] = {
+                    word: count / total_count_en 
+                    for word, count in word_counts_en.items()
+                }
+            refined_topics[k]['total_refined_words_en'] = len(word_counts_en)
+            
+            # Chinese words
+            word_counts_cn = refined_topics[k]['refined_word_counts_cn']
+            total_count_cn = sum(word_counts_cn.values())
+            if total_count_cn > 0:
+                refined_topics[k]['normalized_freq_dist_cn'] = {
+                    word: count / total_count_cn 
+                    for word, count in word_counts_cn.items()
+                }
+            refined_topics[k]['total_refined_words_cn'] = len(word_counts_cn)
+        
         return refined_topics
     
     def get_high_confidence_words(self, 
                                   refined_topics: List[Dict], 
                                   min_frequency: float = 0.1,
-                                  top_k: int = 10) -> List[Dict]:
+                                  top_k: int = 15) -> List[Dict]:
         """
         Extract high-confidence words based on frequency threshold
         
@@ -251,27 +299,37 @@ Focus on the most coherent and representative words from both languages.
         
         for topic_data in refined_topics:
             topic_id = topic_data['topic_id']
-            freq_dist = topic_data['normalized_freq_dist']
+            freq_dist_en = topic_data['normalized_freq_dist_en']
+            freq_dist_cn = topic_data['normalized_freq_dist_cn']
             
-            # Filter words by minimum frequency and take top-k
-            high_conf_words = [
-                (word, freq) for word, freq in freq_dist.items() 
+            # For English
+            high_conf_words_en = [
+                (word, freq) for word, freq in freq_dist_en.items() 
                 if freq >= min_frequency
             ]
+            high_conf_words_en.sort(key=lambda x: x[1], reverse=True)
+            high_conf_words_en = high_conf_words_en[:top_k]
             
-            # Sort by frequency and take top-k
-            high_conf_words.sort(key=lambda x: x[1], reverse=True)
-            high_conf_words = high_conf_words[:top_k]
+            # For Chinese
+            high_conf_words_cn = [
+                (word, freq) for word, freq in freq_dist_cn.items() 
+                if freq >= min_frequency
+            ]
+            high_conf_words_cn.sort(key=lambda x: x[1], reverse=True)
+            high_conf_words_cn = high_conf_words_cn[:top_k]
             
             high_confidence_topic = {
                 'topic_id': topic_id,
-                'high_confidence_words': [word for word, freq in high_conf_words],
-                'word_frequencies': dict(high_conf_words),
-                'num_high_conf_words': len(high_conf_words)
+                'high_confidence_words_en': [word for word, freq in high_conf_words_en],
+                'high_confidence_words_cn': [word for word, freq in high_conf_words_cn],
+                'word_frequencies_en': dict(high_conf_words_en),
+                'word_frequencies_cn': dict(high_conf_words_cn),
+                'num_high_conf_words_en': len(high_conf_words_en),
+                'num_high_conf_words_cn': len(high_conf_words_cn)
             }
             
             high_confidence_topics.append(high_confidence_topic)
-            
+        
         return high_confidence_topics
 
 
@@ -283,18 +341,18 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
                                 R: int = 3,
                                 min_frequency: float = 0.1) -> Tuple[List[Dict], List[Dict]]:
     """
-    Main function to perform cross-lingual topic refinement
+    Main function to perform cross-lingual topic refinement for all topics at once
     
     Mathematical Framework:
-    1. Cross-lingual pooling: W_k = w^{(A)}_k ∪ w^{(B)}_k (combined words from both languages)
-    2. Self-consistent refinement: W'_k = ⋃_{r=1}^R w^{(r)}_k
-    3. Frequency-based confidence: Ũ_k(j) = Count(w_j ∈ W'_k) / Σ_{j'} Count(w_{j'} ∈ W'_k)
+    1. Process all 50 topics simultaneously in each refinement round
+    2. Self-consistent refinement: Refine top 15 by removing irrelevant and adding from top 50, repeat R times
+    3. Frequency-based confidence: Aggregate across rounds for each topic
     
     Args:
-        topic_words_en: English topic words (each topic has up to 15 words)
-        topic_words_cn: Chinese topic words (each topic has up to 15 words)
-        topic_probas_en: English topic probabilities [num_topics, 15]
-        topic_probas_cn: Chinese topic probabilities [num_topics, 15]
+        topic_words_en: English topic words (50 topics, each with 50 words)
+        topic_words_cn: Chinese topic words (50 topics, each with 50 words)
+        topic_probas_en: English topic probabilities [50, 50]
+        topic_probas_cn: Chinese topic probabilities [50, 50]
         api_key: Gemini API key
         R: Number of refinement rounds
         min_frequency: Minimum frequency threshold for high-confidence words
@@ -304,20 +362,14 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
     """
     refiner = CrossLingualTopicRefiner(api_key)
     
-    # Step 1: Cross-lingual word pooling - W_k = w^{(A)}_k ∪ w^{(B)}_k
-    pooled_topics = refiner.cross_lingual_word_pooling(
-        topic_words_en, topic_words_cn,
-        topic_probas_en, topic_probas_cn
-    )
+    print(f"Starting batch refinement for {len(topic_words_en)} topics with {R} rounds each...")
     
-    print(f"Created pooled topics: {len(pooled_topics)} topics with combined cross-lingual words")
+    # Process all topics together in each refinement round
+    refined_topics = refiner.self_consistent_refinement(topic_words_en, topic_words_cn, R=R)
     
-    # Step 2: Self-consistent refinement - W'_k = ⋃_{r=1}^R w^{(r)}_k
-    refined_topics = refiner.self_consistent_refinement(pooled_topics, R=R)
-    
-    # Step 3: Extract high-confidence words based on frequency
+    # Extract high-confidence words based on frequency
     high_confidence_topics = refiner.get_high_confidence_words(
-        refined_topics, min_frequency=min_frequency
+        refined_topics, min_frequency=min_frequency, top_k=15
     )
     
     return refined_topics, high_confidence_topics
