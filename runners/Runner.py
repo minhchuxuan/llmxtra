@@ -72,12 +72,16 @@ class Runner:
                 print(f"Created clean probability distributions over top {topk} words")
                 print(f"English topic_probas shape: {topic_probas_en.shape}")
                 print(f"Chinese topic_probas shape: {topic_probas_cn.shape}")
+
+                # Store vocabulary indices for loss computation
+                self.topic_indices_en = top_indices_en
+                self.topic_indices_cn = top_indices_cn
                 
                 # Cross-lingual topic refinement using Gemini API
                 refined_topics, high_confidence_topics = None, None
                 if hasattr(self.args, 'gemini_api_key') and self.args.gemini_api_key:
                     print("Starting cross-lingual topic refinement...")
-                    
+
                     refined_topics, high_confidence_topics = refine_cross_lingual_topics(
                         topic_words_en=topic_words_en,
                         topic_words_cn=topic_words_cn,
@@ -87,9 +91,9 @@ class Runner:
                         R=getattr(self.args, 'refinement_rounds', 3),
                         min_frequency=getattr(self.args, 'min_frequency', 0.01)  # Lower threshold: 1% instead of 10%
                     )
-                    
+
                     print(f"Refined {len(refined_topics)} topics using cross-lingual refinement")
-                    
+
                     # Print summary of refined topics
                     for i, (refined, high_conf) in enumerate(zip(refined_topics, high_confidence_topics)):
                         total_words = len(high_conf['high_confidence_words_en']) + len(high_conf['high_confidence_words_cn'])
@@ -99,6 +103,10 @@ class Runner:
 
                 else:
                     print("No Gemini API key provided, skipping cross-lingual refinement")
+
+                # Store refined topics for evaluation
+                self.refined_topics = refined_topics
+                self.high_confidence_topics = high_confidence_topics
                 #TO-do: add loss ot 
 
             sum_loss = 0.
@@ -125,16 +133,18 @@ class Runner:
                 batch_loss = rst_dict['loss']
                 
                 # Add refinement loss if we have refined topics
-                if (epoch >= self.args.warmStep and 
-                    refined_topics is not None and 
+                if (epoch >= self.args.warmStep and
+                    refined_topics is not None and
                     high_confidence_topics is not None and
-                    hasattr(self.args, 'refine_weight') and 
+                    hasattr(self.args, 'refine_weight') and
                     self.args.refine_weight > 0):
-                    
+
                     try:
                         refine_loss = compute_cross_lingual_refine_loss(
                             topic_probas_en=topic_probas_en,
                             topic_probas_cn=topic_probas_cn,
+                            topic_indices_en=self.topic_indices_en,
+                            topic_indices_cn=self.topic_indices_cn,
                             refined_topics=refined_topics,
                             high_confidence_topics=high_confidence_topics,
                             vocab_en=self.model.vocab_en,

@@ -65,7 +65,7 @@ def parse_args():
 
 
 def export_beta(beta, vocab, output_prefix, lang):
-    num_top_word = 50  # Use 50 words for consistency with refinement vocabulary
+    num_top_word = 15  # Standard evaluation uses 15 words
     topic_str_list = file_utils.print_topic_words(beta, vocab, num_top_word=num_top_word)
     file_utils.save_text(topic_str_list, path=f'{output_prefix}/T{num_top_word}_{lang}.txt')
     return topic_str_list
@@ -125,10 +125,36 @@ def main():
 
     runner = Runner(args)
 
+    # Train with refinement if API key available
     beta_en, beta_cn = runner.train(dataset_handler.train_loader)
 
-    topic_str_list_en = export_beta(beta_en, dataset_handler.vocab_en, output_prefix, lang=args.lang1)
-    topic_str_list_cn = export_beta(beta_cn, dataset_handler.vocab_cn, output_prefix, lang=args.lang2)
+    # Get refined topics if available
+    refined_topics = getattr(runner, 'refined_topics', None)
+    high_confidence_topics = getattr(runner, 'high_confidence_topics', None)
+
+    # Use refined words for evaluation if available, otherwise use original beta
+    if refined_topics is not None and high_confidence_topics is not None:
+        # Create topic strings from refined words (top 15 per topic for evaluation)
+        topic_str_list_en = []
+        topic_str_list_cn = []
+
+        for i in range(len(refined_topics)):
+            # Get high-confidence words for each topic (limited to 15 for evaluation)
+            en_words = high_confidence_topics[i]['high_confidence_words_en'][:15]
+            cn_words = high_confidence_topics[i]['high_confidence_words_cn'][:15]
+
+            # Create topic strings
+            topic_str_en = ' '.join(en_words)
+            topic_str_cn = ' '.join(cn_words)
+            topic_str_list_en.append(topic_str_en)
+            topic_str_list_cn.append(topic_str_cn)
+
+        print(f"Using refined words for evaluation ({len(topic_str_list_en)} topics)")
+    else:
+        # Fallback to original beta matrices
+        topic_str_list_en = export_beta(beta_en, dataset_handler.vocab_en, output_prefix, lang=args.lang1)
+        topic_str_list_cn = export_beta(beta_cn, dataset_handler.vocab_cn, output_prefix, lang=args.lang2)
+        print(f"Using original beta for evaluation ({len(topic_str_list_en)} topics)")
 
     for i in range(len(topic_str_list_en)):
         print(topic_str_list_en[i])
@@ -150,7 +176,7 @@ def main():
     
     # Calculate CNPMI
     parallel_corpus_tuples = file_utils.read_yaml(args.ref_corpus_config)['parallel_corpus_tuples']
-    num_top_word = 50  # Use 50 words for consistency with refinement vocabulary
+    num_top_word = 15  # Standard NPMI calculation uses 15 words
 
     sep_token = '|'
 
@@ -227,7 +253,7 @@ def main():
     dataset_name = args.dataset # Example: Change to your dataset
     model_name = args.model      # Example: Change to your model name
     num_topics = args.num_topic             # Example: Number of topics used in the model
-    # num_top_words_display = 50   # Number of top words in the output files (T50)
+    # num_top_words_display = 15   # Number of top words in the output files (T15)
 
     # Construct paths
     # base_output_dir = f"./output/{dataset_name}"

@@ -5,6 +5,7 @@ import warnings
 
 
 def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
+                                      topic_indices_en, topic_indices_cn,
                                       refined_topics, high_confidence_topics,
                                       vocab_en, vocab_cn,
                                       model=None):
@@ -14,6 +15,8 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
     Args:
         topic_probas_en: English topic probabilities [num_topics, 15]
         topic_probas_cn: Chinese topic probabilities [num_topics, 15]
+        topic_indices_en: Original vocabulary indices for English topics [num_topics, 15]
+        topic_indices_cn: Original vocabulary indices for Chinese topics [num_topics, 15]
         refined_topics: Output from cross-lingual refinement
         high_confidence_topics: High confidence words from refinement
         vocab_en: English vocabulary
@@ -38,12 +41,12 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
         if (i < len(high_confidence_topics) and 
             (high_confidence_topics[i]['high_confidence_words_en'] or 
              high_confidence_topics[i]['high_confidence_words_cn'])):
-            # Get current topic words and probabilities  
-            en_indices = torch.topk(topic_probas_en[i], k=15).indices
+            # Get current topic words and probabilities using stored vocabulary indices
+            en_indices = topic_indices_en[i]
             en_words = [vocab_en[idx] for idx in en_indices.cpu().numpy()]
             en_probs = topic_probas_en[i][:len(en_words)].to(torch.float64)
-            
-            cn_indices = torch.topk(topic_probas_cn[i], k=15).indices 
+
+            cn_indices = topic_indices_cn[i]
             cn_words = [vocab_cn[idx] for idx in cn_indices.cpu().numpy()]
             cn_probs = topic_probas_cn[i][:len(cn_words)].to(torch.float64)
             
@@ -69,10 +72,11 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
 
             refined_word_prob = {}
             # freq_dict_en and freq_dict_cn are already normalized (sum to 1.0 each)
+            # Apply equal weighting to maintain mass conservation (total mass = 1.0)
             for word, freq in freq_dict_en.items():
-                refined_word_prob[word] = refined_word_prob.get(word, 0) + freq
+                refined_word_prob[word] = refined_word_prob.get(word, 0) + freq * lang_weight
             for word, freq in freq_dict_cn.items():
-                refined_word_prob[word] = refined_word_prob.get(word, 0) + freq
+                refined_word_prob[word] = refined_word_prob.get(word, 0) + freq * lang_weight
             
             if len(refined_word_prob) > 0:
                 # Create union vocabulary for proper alignment
