@@ -1,30 +1,35 @@
 import torch
 import numpy as np
 import ot
-from sentence_transformers import SentenceTransformer
+import warnings
 
 
-def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn, 
+def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
                                       refined_topics, high_confidence_topics,
-                                      vocab_en, vocab_cn, 
-                                      embedding_model=None):
+                                      vocab_en, vocab_cn,
+                                      model=None):
     """
     Compute refinement loss for cross-lingual topic modeling using proper OT.
-    
+
     Args:
         topic_probas_en: English topic probabilities [num_topics, 15]
-        topic_probas_cn: Chinese topic probabilities [num_topics, 15] 
+        topic_probas_cn: Chinese topic probabilities [num_topics, 15]
         refined_topics: Output from cross-lingual refinement
         high_confidence_topics: High confidence words from refinement
         vocab_en: English vocabulary
         vocab_cn: Chinese vocabulary
-        embedding_model: Sentence transformer model for cost computation
-        
+        model: XTRA model with access to pre-computed word embeddings
+
     Returns:
         refine_loss: Scalar tensor representing refinement loss
     """
-    if embedding_model is None:
-        embedding_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+    if model is None:
+        raise ValueError("XTRA model is required for word embeddings")
+
+    # Check if word embeddings are available
+    if model.word_embeddings_en is None or model.word_embeddings_cn is None:
+        warnings.warn("Word embeddings not available in model. OT loss computation will use zero vectors for missing words.")
+        return torch.tensor(0.0, device=topic_probas_en.device)
     
     num_topics = topic_probas_en.shape[0]
     ot_dists = torch.zeros(size=(num_topics,)).cuda()
@@ -45,27 +50,29 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
             # Create proper combined distribution (avoid double counting, normalize to sum=1)
             current_word_prob = {}
             lang_weight = 0.5  # Equal weight for both languages
-            
+
             for word, prob in zip(en_words, en_probs):
                 current_word_prob[word] = current_word_prob.get(word, 0) + prob.item() * lang_weight
             for word, prob in zip(cn_words, cn_probs):
                 current_word_prob[word] = current_word_prob.get(word, 0) + prob.item() * lang_weight
+
+            # Normalize current_word_prob to sum to 1
+            total_prob = sum(current_word_prob.values())
+            if total_prob > 0:
+                current_word_prob = {word: prob/total_prob for word, prob in current_word_prob.items()}
             
-            # Get refined words and normalize frequencies to probabilities
+            # Get refined words and combine normalized frequency distributions
             refined_words_en = high_confidence_topics[i]['high_confidence_words_en']
             refined_words_cn = high_confidence_topics[i]['high_confidence_words_cn']
             freq_dict_en = high_confidence_topics[i]['word_frequencies_en']
             freq_dict_cn = high_confidence_topics[i]['word_frequencies_cn']
-            
-            # Normalize frequencies to create proper probability distribution
-            total_freq = sum(freq_dict_en.values()) + sum(freq_dict_cn.values())
+
             refined_word_prob = {}
-            
-            if total_freq > 0:
-                for word, freq in freq_dict_en.items():
-                    refined_word_prob[word] = refined_word_prob.get(word, 0) + (freq / total_freq) * lang_weight
-                for word, freq in freq_dict_cn.items():
-                    refined_word_prob[word] = refined_word_prob.get(word, 0) + (freq / total_freq) * lang_weight
+            # freq_dict_en and freq_dict_cn are already normalized (sum to 1.0 each)
+            for word, freq in freq_dict_en.items():
+                refined_word_prob[word] = refined_word_prob.get(word, 0) + freq
+            for word, freq in freq_dict_cn.items():
+                refined_word_prob[word] = refined_word_prob.get(word, 0) + freq
             
             if len(refined_word_prob) > 0:
                 # Create union vocabulary for proper alignment
@@ -87,10 +94,14 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
                 if refined_aligned.sum() > 0:
                     refined_aligned = refined_aligned / refined_aligned.sum()
                 
-                # Compute cost matrix and OT distance
-                cost_M = compute_embedding_cost_matrix(all_words, all_words, embedding_model)
-                dist = ot.emd2(current_aligned, refined_aligned, cost_M)
-                ot_dists[i] = dist
+                # Compute cost matrix using pre-computed word embeddings
+                cost_M = compute_embedding_cost_matrix_from_precomputed(all_words, model)
+                try:
+                    dist = ot.emd2(current_aligned, refined_aligned, cost_M)
+                    ot_dists[i] = dist
+                except Exception as e:
+                    print(f"Warning: OT computation failed for topic {i}: {e}")
+                    ot_dists[i] = 0.0
             else:
                 ot_dists[i] = 0.0
         else:
@@ -112,38 +123,67 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
     return torch.sum(ot_dists * topic_weights)
 
 
-def compute_embedding_cost_matrix(words1, words2, embedding_model):
+def compute_embedding_cost_matrix_from_precomputed(words, model):
     """
-    Compute cost matrix between two sets of words using embeddings.
-    
+    Compute cost matrix between words using pre-computed word embeddings.
+
     Args:
-        words1: List of words from current topic
-        words2: List of refined words  
-        embedding_model: Sentence transformer model
-        
+        words: List of words (same list for both dimensions since it's symmetric)
+        model: XTRA model with access to pre-computed word embeddings
+
     Returns:
-        cost_M: Cost matrix [len(words1), len(words2)]
+        cost_M: Cost matrix [len(words), len(words)]
     """
-    # Get embeddings for both word sets
-    embeddings1 = embedding_model.encode(words1)
-    embeddings2 = embedding_model.encode(words2)
-    
-    # Convert to tensors
-    emb1 = torch.tensor(embeddings1, dtype=torch.float64).cuda()
-    emb2 = torch.tensor(embeddings2, dtype=torch.float64).cuda()
-    
+    # Get embeddings for all words
+    # First, create a mapping from word to index in the vocabulary
+    vocab_en = model.vocab_en
+    vocab_cn = model.vocab_cn
+
+    # Create word to index mapping
+    word_to_idx_en = {word: idx for idx, word in enumerate(vocab_en)}
+    word_to_idx_cn = {word: idx for idx, word in enumerate(vocab_cn)}
+
+    # Get embeddings for all words
+    embeddings = []
+
+    for word in words:
+        # Try to find word in English vocab first
+        if word in word_to_idx_en:
+            idx = word_to_idx_en[word]
+            emb = model.get_word_embedding([idx], lang='en')
+            if emb is not None:
+                embeddings.append(emb[0])  # Take first (and only) embedding
+            else:
+                # Fallback: use zero vector
+                embeddings.append(torch.zeros(model.word_embeddings_en.shape[1], dtype=torch.float64, device=model.word_embeddings_en.device))
+        # Try Chinese vocab
+        elif word in word_to_idx_cn:
+            idx = word_to_idx_cn[word]
+            emb = model.get_word_embedding([idx], lang='cn')
+            if emb is not None:
+                embeddings.append(emb[0])  # Take first (and only) embedding
+            else:
+                # Fallback: use zero vector
+                embeddings.append(torch.zeros(model.word_embeddings_cn.shape[1], dtype=torch.float64, device=model.word_embeddings_cn.device))
+        else:
+            # Word not found in either vocabulary - use zero vector
+            emb_dim = model.word_embeddings_en.shape[1] if model.word_embeddings_en is not None else 768
+            embeddings.append(torch.zeros(emb_dim, dtype=torch.float64, device=next(model.parameters()).device))
+
+    # Stack embeddings
+    embeddings_tensor = torch.stack(embeddings)
+
     # Compute cosine distance matrix
     # Normalize embeddings
-    emb1_norm = emb1 / emb1.norm(dim=1, keepdim=True)
-    emb2_norm = emb2 / emb2.norm(dim=1, keepdim=True)
-    
+    emb_norm = embeddings_tensor / (embeddings_tensor.norm(dim=1, keepdim=True) + 1e-8)
+
     # Cosine similarity matrix
-    cos_sim = torch.mm(emb1_norm, emb2_norm.t())
-    
+    cos_sim = torch.mm(emb_norm, emb_norm.t())
+
     # Convert to distance (1 - cosine similarity)
     cost_M = 1.0 - cos_sim
-    
+
     # Ensure non-negative and proper shape
     cost_M = torch.clamp(cost_M, min=0.0)
-    
+
     return cost_M

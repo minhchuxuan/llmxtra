@@ -138,7 +138,8 @@ class Runner:
                             refined_topics=refined_topics,
                             high_confidence_topics=high_confidence_topics,
                             vocab_en=self.model.vocab_en,
-                            vocab_cn=self.model.vocab_cn
+                            vocab_cn=self.model.vocab_cn,
+                            model=self.model
                         )
                         
                         if refine_loss > 0:

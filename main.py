@@ -117,6 +117,10 @@ def main():
 
     args.vocab_en = dataset_handler.vocab_en
     args.vocab_cn = dataset_handler.vocab_cn
+
+    # Pass word embeddings to args
+    args.word_embeddings_en = dataset_handler.word_embeddings_en
+    args.word_embeddings_cn = dataset_handler.word_embeddings_cn
     
 
     runner = Runner(args)

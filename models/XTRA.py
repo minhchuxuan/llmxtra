@@ -12,6 +12,10 @@ class XTRA(nn.Module):
         self.vocab_en = args.vocab_en
         self.vocab_cn = args.vocab_cn
         self.share_dim=args.share_dim
+
+        # Store word embeddings if available
+        self.word_embeddings_en = getattr(args, 'word_embeddings_en', None)
+        self.word_embeddings_cn = getattr(args, 'word_embeddings_cn', None)
         
         # Lấy kích thước doc embedding
         doc_emb_dim = args.doc_embeddings_en[0].shape[0] if hasattr(args, 'doc_embeddings_en') and len(args.doc_embeddings_en) > 0 else 1024
@@ -107,6 +111,41 @@ class XTRA(nn.Module):
         beta_en = self.beta_en
         beta_cn = self.beta_cn
         return beta_en, beta_cn
+
+    def get_word_embedding(self, word_indices, lang='en'):
+        """
+        Get word embeddings for given vocabulary indices.
+
+        Args:
+            word_indices: List or tensor of vocabulary indices
+            lang: Language ('en' or 'cn')
+
+        Returns:
+            Tensor of word embeddings [batch_size, embedding_dim]
+        """
+        if lang == 'en':
+            word_embeddings = self.word_embeddings_en
+            vocab = self.vocab_en
+        else:
+            word_embeddings = self.word_embeddings_cn
+            vocab = self.vocab_cn
+
+        if word_embeddings is None:
+            return None
+
+        # Convert indices to tensor if needed
+        if not torch.is_tensor(word_indices):
+            word_indices = torch.tensor(word_indices, dtype=torch.long)
+
+        # Move to same device as model
+        device = self.beta_en.device
+        word_indices = word_indices.to(device)
+        word_embeddings = torch.tensor(word_embeddings, dtype=torch.float, device=device)
+
+        # Get embeddings for the specified indices
+        embeddings = word_embeddings[word_indices]
+
+        return embeddings
 
     # Sửa lại phương thức get_theta để sử dụng shared encoder với doc_embeddings
     def get_theta(self, bow, lang='en'):

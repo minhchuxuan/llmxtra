@@ -67,6 +67,16 @@ class DatasetHandler:
         # Load cluster information
         self.clusterinfo_en = np.load(os.path.join(data_dir, f'cluster_labels_{lang1}_cosine.npy'))
         self.clusterinfo_cn = np.load(os.path.join(data_dir, f'cluster_labels_{lang2}_cosine.npy'))
+
+        # Load word embeddings
+        try:
+            self.word_embeddings_en = np.load(os.path.join(data_dir, f'word_embeddings_{lang1}.npy'))
+            self.word_embeddings_cn = np.load(os.path.join(data_dir, f'word_embeddings_{lang2}.npy'))
+            print(f"Loaded word embeddings: EN {self.word_embeddings_en.shape}, CN {self.word_embeddings_cn.shape}")
+        except FileNotFoundError:
+            print(f"Warning: Word embeddings not found in {data_dir}")
+            self.word_embeddings_en = None
+            self.word_embeddings_cn = None
         
         # Load translation dictionary
 
