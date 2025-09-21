@@ -21,24 +21,24 @@ class CrossLingualTopicRefiner:
         genai.configure(api_key=api_key)
         self.model = genai.GenerativeModel(model_name)
         
-    def cross_lingual_word_pooling(self, 
-                                   topic_words_en: List[str], 
+    def cross_lingual_word_pooling(self,
+                                   topic_words_en: List[str],
                                    topic_words_cn: List[str],
                                    topic_probas_en: torch.Tensor,
                                    topic_probas_cn: torch.Tensor) -> List[Dict]:
         """
         Cross-Lingual Topic Word Pooling
-        
+
         For each topic k, produces:
         W_k = w^{(A)}_k ∪ w^{(B)}_k (combined words from both languages)
         T_k = t^{(A)}_k ∪ t^{(B)}_k (corresponding probability distributions)
-        
+
         Args:
-            topic_words_en: List of English topic word strings (each has up to 15 words)
-            topic_words_cn: List of Chinese topic word strings (each has up to 15 words)
+            topic_words_en: List of English topic word strings (each with 50 words vocabulary)
+            topic_words_cn: List of Chinese topic word strings (each with 50 words vocabulary)
             topic_probas_en: English topic probability distributions [num_topics, 15]
             topic_probas_cn: Chinese topic probability distributions [num_topics, 15]
-            
+
         Returns:
             List of pooled topics with combined words and probabilities
         """
@@ -46,14 +46,18 @@ class CrossLingualTopicRefiner:
         num_topics = len(topic_words_en)
         
         for k in range(num_topics):
-            # Extract words for topic k
-            en_words = topic_words_en[k].split()[:15]
-            cn_words = topic_words_cn[k].split()[:15]
-            
-            # Match probabilities to actual word count
+            # Extract all 50 words for topic k (vocabulary)
+            en_words_50 = topic_words_en[k].split()[:50]
+            cn_words_50 = topic_words_cn[k].split()[:50]
+
+            # Take top 15 words for refinement focus
+            en_words = en_words_50[:15]
+            cn_words = cn_words_50[:15]
+
+            # Match probabilities to actual word count (top 15)
             en_probs = topic_probas_en[k].detach().cpu().numpy()[:len(en_words)]
             cn_probs = topic_probas_cn[k].detach().cpu().numpy()[:len(cn_words)]
-            
+
             # Create combined word set and probabilities
             combined_words = en_words + cn_words
             combined_probs = np.concatenate([en_probs, cn_probs])
@@ -84,8 +88,8 @@ class CrossLingualTopicRefiner:
         Create prompt for refining all topics at once
 
         Args:
-            topic_words_en: List of English topic word strings (each with 50 words)
-            topic_words_cn: List of Chinese topic word strings (each with 50 words)
+            topic_words_en: List of English topic word strings (each with 50 words vocabulary)
+            topic_words_cn: List of Chinese topic word strings (each with 50 words vocabulary)
 
         Returns:
             Formatted prompt string for all topics
@@ -94,11 +98,12 @@ class CrossLingualTopicRefiner:
 
         prompt = f"""Given the following cross-lingual topic words from English and Chinese for {num_topics} topics, please refine and improve each topic by:
 
-1. For each topic, the top 15 words from each language are the most probable (first 15 in the list).
-2. Identify the main theme that connects these words across both languages for each topic
-3. Remove any irrelevant or noisy words from the top 15 that don't fit the coherent theme
-4. Add relevant words from the full top 50 list that strengthen the topic coherence
-5. Ensure each refined topic has exactly 15 words per language that maintain good cross-lingual representation
+1. For each topic, we provide a vocabulary of top 50 words from each language.
+2. The top 15 words from each language are the most probable (first 15 in the list) and represent the current topic theme.
+3. Identify the main theme that connects these top 15 words across both languages for each topic
+4. Remove any irrelevant or noisy words from the top 15 that don't fit the coherent theme
+5. Add relevant words from the full top 50 vocabulary list that strengthen the topic coherence
+6. Ensure each refined topic has exactly 15 words per language that maintain good cross-lingual representation
 
 """
 
@@ -182,20 +187,20 @@ Focus on the most coherent and representative words from both languages for each
                     
         return None
     
-    def self_consistent_refinement(self, 
-                                   topic_words_en: List[str], 
-                                   topic_words_cn: List[str], 
+    def self_consistent_refinement(self,
+                                   topic_words_en: List[str],
+                                   topic_words_cn: List[str],
                                    R: int = 3) -> List[Dict]:
         """
         Self-Consistent Refinement for all topics at once
-        
+
         Performs R refinements for all topics in each round.
-        
+
         Args:
-            topic_words_en: List of English topic word strings (each with 50 words)
-            topic_words_cn: List of Chinese topic word strings (each with 50 words)
+            topic_words_en: List of English topic word strings (each with 50 words vocabulary)
+            topic_words_cn: List of Chinese topic word strings (each with 50 words vocabulary)
             R: Number of refinement rounds
-            
+
         Returns:
             List of refined topics with frequency-based confidence scores
         """
@@ -354,21 +359,21 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
                                 min_frequency: float = 0.1) -> Tuple[List[Dict], List[Dict]]:
     """
     Main function to perform cross-lingual topic refinement for all topics at once
-    
+
     Mathematical Framework:
     1. Process all 50 topics simultaneously in each refinement round
-    2. Self-consistent refinement: Refine top 15 by removing irrelevant and adding from top 50, repeat R times
+    2. Self-consistent refinement: Refine top 15 words by removing irrelevant and adding from 50-word vocabulary, repeat R times
     3. Frequency-based confidence: Aggregate across rounds for each topic
-    
+
     Args:
-        topic_words_en: English topic words (50 topics, each with 50 words)
-        topic_words_cn: Chinese topic words (50 topics, each with 50 words)
-        topic_probas_en: English topic probabilities [50, 50]
-        topic_probas_cn: Chinese topic probabilities [50, 50]
+        topic_words_en: English topic words (50 topics, each with 50 words vocabulary)
+        topic_words_cn: Chinese topic words (50 topics, each with 50 words vocabulary)
+        topic_probas_en: English topic probabilities [50, 15] (top 15 words)
+        topic_probas_cn: Chinese topic probabilities [50, 15] (top 15 words)
         api_key: Gemini API key
         R: Number of refinement rounds
         min_frequency: Minimum frequency threshold for high-confidence words
-        
+
     Returns:
         Tuple of (refined_topics, high_confidence_topics)
     """

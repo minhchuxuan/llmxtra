@@ -51,7 +51,7 @@ class Runner:
             if epoch >= self.args.warmStep:
                 # Extract topic words from current beta
                 beta_en, beta_cn = self.model.get_beta()
-                topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn)
+                topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn, topk=50)
                 print(f"Phase 2 - Epoch {epoch}: Extracted topic words")
                 print(f"English topic words: {len(topic_words_en)} topics")
                 print(f"Chinese topic words: {len(topic_words_cn)} topics")
@@ -205,33 +205,43 @@ class Runner:
         theta_cn = self.get_theta(dataset.bow_cn, lang='cn')
         return theta_en, theta_cn
 
-    def get_topic_words(self, beta_en, beta_cn, topk=15):
-        """Extract top words for each topic from beta matrices"""
+    def get_topic_words(self, beta_en, beta_cn, topk_refine=50, topk_loss=15):
+        """Extract top words for each topic from beta matrices
+
+        Args:
+            beta_en: English beta matrix
+            beta_cn: Chinese beta matrix
+            topk_refine: Number of words for refinement vocabulary (default: 50)
+            topk_loss: Number of words for loss computation (default: 15)
+
+        Returns:
+            topic_words_en, topic_words_cn: Lists of topic word strings
+        """
         # Convert CUDA tensors to numpy arrays if necessary
         if torch.is_tensor(beta_en):
             beta_en = beta_en.detach().cpu().numpy()
         if torch.is_tensor(beta_cn):
             beta_cn = beta_cn.detach().cpu().numpy()
-        
+
         topic_words_en = []
         topic_words_cn = []
-        
+
         # Get vocabularies from the model
         vocab_en = self.model.vocab_en
         vocab_cn = self.model.vocab_cn
-        
+
         # Extract top words for each topic in English
         for i, topic_dist in enumerate(beta_en):
-            top_word_indices = np.argsort(topic_dist)[:-(topk + 1):-1]
+            top_word_indices = np.argsort(topic_dist)[:-(topk_refine + 1):-1]
             topic_words = np.array(vocab_en)[top_word_indices]
             topic_str = ' '.join(topic_words)
             topic_words_en.append(topic_str)
-        
+
         # Extract top words for each topic in Chinese
         for i, topic_dist in enumerate(beta_cn):
-            top_word_indices = np.argsort(topic_dist)[:-(topk + 1):-1]
+            top_word_indices = np.argsort(topic_dist)[:-(topk_refine + 1):-1]
             topic_words = np.array(vocab_cn)[top_word_indices]
             topic_str = ' '.join(topic_words)
             topic_words_cn.append(topic_str)
-            
+
         return topic_words_en, topic_words_cn

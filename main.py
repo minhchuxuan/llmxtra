@@ -65,7 +65,7 @@ def parse_args():
 
 
 def export_beta(beta, vocab, output_prefix, lang):
-    num_top_word = 15
+    num_top_word = 50  # Use 50 words for consistency with refinement vocabulary
     topic_str_list = file_utils.print_topic_words(beta, vocab, num_top_word=num_top_word)
     file_utils.save_text(topic_str_list, path=f'{output_prefix}/T{num_top_word}_{lang}.txt')
     return topic_str_list
@@ -150,7 +150,7 @@ def main():
     
     # Calculate CNPMI
     parallel_corpus_tuples = file_utils.read_yaml(args.ref_corpus_config)['parallel_corpus_tuples']
-    num_top_word = 15
+    num_top_word = 50  # Use 50 words for consistency with refinement vocabulary
 
     sep_token = '|'
 
@@ -210,7 +210,7 @@ def main():
     tu_lang1 = TU_eva(texts)
     print(f"TU_{args.lang1}: {tu_lang1:.5f}")
     wandb.log({f"TU_{args.lang1}": tu_lang1})
-    
+
     texts = list()
     with open(f'{output_prefix}/T{num_top_word}_{args.lang2}.txt', 'r') as file:
         for line in file:
@@ -227,7 +227,7 @@ def main():
     dataset_name = args.dataset # Example: Change to your dataset
     model_name = args.model      # Example: Change to your model name
     num_topics = args.num_topic             # Example: Number of topics used in the model
-    # num_top_words_display = 15   # Example: Number of top words in the output files (T15)
+    # num_top_words_display = 50   # Number of top words in the output files (T50)
 
     # Construct paths
     # base_output_dir = f"./output/{dataset_name}"
