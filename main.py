@@ -147,6 +147,9 @@ def main():
             topic_str_list_en.append(topic_str_en)
             topic_str_list_cn.append(topic_str_cn)
 
+        # Save refined topic files for CNPMI evaluation
+        file_utils.save_text(topic_str_list_en, path=f'{output_prefix}/T15_{args.lang1}.txt')
+        file_utils.save_text(topic_str_list_cn, path=f'{output_prefix}/T15_{args.lang2}.txt')
         print(f"Using refined words for evaluation ({len(topic_str_list_en)} topics)")
     else:
         # Fallback to original beta matrices

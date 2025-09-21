@@ -51,7 +51,7 @@ class Runner:
             if epoch >= self.args.warmStep:
                 # Extract topic words from current beta
                 beta_en, beta_cn = self.model.get_beta()
-                topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn, topk=50)
+                topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn, topk_refine=50)
                 print(f"Phase 2 - Epoch {epoch}: Extracted topic words")
                 print(f"English topic words: {len(topic_words_en)} topics")
                 print(f"Chinese topic words: {len(topic_words_cn)} topics")
@@ -152,17 +152,18 @@ class Runner:
                             model=self.model
                         )
                         
-                        if refine_loss > 0:
+                        if refine_loss.detach().item() > 0:
                             weighted_refine_loss = self.args.refine_weight * refine_loss
                             batch_loss = batch_loss + weighted_refine_loss
-                            rst_dict['refine_loss'] = refine_loss
+                            rst_dict['refine_loss'] = refine_loss.detach()
                             
                     except Exception as e:
                         print(f"Warning: Failed to compute refinement loss: {e}")
 
                 for key in rst_dict:
                     if 'loss' in key:
-                        loss_rst_dict[key] += rst_dict[key]
+                        val = rst_dict[key]
+                        loss_rst_dict[key] += float(val) if torch.is_tensor(val) else float(val)
 
                 optimizer.zero_grad()
                 batch_loss.backward()

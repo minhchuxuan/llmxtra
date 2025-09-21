@@ -1,8 +1,20 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
 import ot
 import warnings
 
+
+def _torch_device_of(model, fallback):
+    """Get model device safely"""
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return fallback
+
+def _ensure_fp32(x, device):
+    """Ensure tensor is float32 on correct device"""
+    return x.to(device=device, dtype=torch.float32)
 
 def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
                                       topic_indices_en, topic_indices_cn,
@@ -10,7 +22,7 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
                                       vocab_en, vocab_cn,
                                       model=None):
     """
-    Compute refinement loss for cross-lingual topic modeling using proper OT.
+    Compute refinement loss for cross-lingual topic modeling using differentiable Sinkhorn OT.
 
     Args:
         topic_probas_en: English topic probabilities [num_topics, 15]
@@ -32,77 +44,73 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
     # Check if word embeddings are available
     if model.word_embeddings_en is None or model.word_embeddings_cn is None:
         warnings.warn("Word embeddings not available in model. OT loss computation will use zero vectors for missing words.")
-        return torch.tensor(0.0, device=topic_probas_en.device)
+        return torch.zeros((), device=topic_probas_en.device, dtype=torch.float32)
+    
+    # Use consistent device/dtype
+    dev = topic_probas_en.device
+    topic_probas_en = _ensure_fp32(topic_probas_en, dev)
+    topic_probas_cn = _ensure_fp32(topic_probas_cn, dev)
     
     num_topics = topic_probas_en.shape[0]
-    ot_dists = torch.zeros(size=(num_topics,)).cuda()
+    ot_dists = torch.zeros(num_topics, device=dev, dtype=torch.float32)
+    
+    # Entropic regularization for differentiability
+    reg = 0.01
     
     for i in range(num_topics):
         if (i < len(high_confidence_topics) and 
             (high_confidence_topics[i]['high_confidence_words_en'] or 
              high_confidence_topics[i]['high_confidence_words_cn'])):
-            # Get current topic words and probabilities using stored vocabulary indices
+            # Get current topic words and probabilities (keep gradients)
             en_indices = topic_indices_en[i]
-            en_words = [vocab_en[idx] for idx in en_indices.cpu().numpy()]
-            en_probs = topic_probas_en[i][:len(en_words)].to(torch.float64)
-
             cn_indices = topic_indices_cn[i]
-            cn_words = [vocab_cn[idx] for idx in cn_indices.cpu().numpy()]
-            cn_probs = topic_probas_cn[i][:len(cn_words)].to(torch.float64)
+            en_words = [vocab_en[idx.item()] for idx in en_indices]
+            cn_words = [vocab_cn[idx.item()] for idx in cn_indices]
             
-            # Create proper combined distribution (avoid double counting, normalize to sum=1)
-            current_word_prob = {}
-            lang_weight = 0.5  # Equal weight for both languages
-
-            for word, prob in zip(en_words, en_probs):
-                current_word_prob[word] = current_word_prob.get(word, 0) + prob.item() * lang_weight
-            for word, prob in zip(cn_words, cn_probs):
-                current_word_prob[word] = current_word_prob.get(word, 0) + prob.item() * lang_weight
-
-            # Normalize current_word_prob to sum to 1
-            total_prob = sum(current_word_prob.values())
-            if total_prob > 0:
-                current_word_prob = {word: prob/total_prob for word, prob in current_word_prob.items()}
+            en_probs = topic_probas_en[i, :len(en_words)]  # tensor (grad OK)
+            cn_probs = topic_probas_cn[i, :len(cn_words)]  # tensor (grad OK)
             
-            # Get refined words and combine normalized frequency distributions
+            # Build union vocabulary
             refined_words_en = high_confidence_topics[i]['high_confidence_words_en']
             refined_words_cn = high_confidence_topics[i]['high_confidence_words_cn']
             freq_dict_en = high_confidence_topics[i]['word_frequencies_en']
             freq_dict_cn = high_confidence_topics[i]['word_frequencies_cn']
-
-            refined_word_prob = {}
-            # freq_dict_en and freq_dict_cn are already normalized (sum to 1.0 each)
-            # Apply equal weighting to maintain mass conservation (total mass = 1.0)
-            for word, freq in freq_dict_en.items():
-                refined_word_prob[word] = refined_word_prob.get(word, 0) + freq * lang_weight
-            for word, freq in freq_dict_cn.items():
-                refined_word_prob[word] = refined_word_prob.get(word, 0) + freq * lang_weight
             
-            if len(refined_word_prob) > 0:
-                # Create union vocabulary for proper alignment
-                all_words = list(set(current_word_prob.keys()) | set(refined_word_prob.keys()))
-                vocab_size = len(all_words)
+            union_words = list({*en_words, *cn_words, *refined_words_en, *refined_words_cn})
+            V = len(union_words)
+            word2pos = {w: j for j, w in enumerate(union_words)}
+            
+            # Current distribution (tensor, gradient flows from en_probs/cn_probs)
+            current = torch.zeros(V, device=dev, dtype=torch.float32)
+            # scatter add English part
+            pos_en = torch.tensor([word2pos[w] for w in en_words], device=dev)
+            current.index_add_(0, pos_en, 0.5 * en_probs)
+            # scatter add Chinese part
+            pos_cn = torch.tensor([word2pos[w] for w in cn_words], device=dev)
+            current.index_add_(0, pos_cn, 0.5 * cn_probs)
+            current = current / (current.sum() + 1e-8)
+            
+            # Refined distribution (no grad, that's OK — it's a target)
+            refined = torch.zeros(V, device=dev, dtype=torch.float32)
+            if len(freq_dict_en) + len(freq_dict_cn) > 0:
+                for w, f in freq_dict_en.items():
+                    j = word2pos.get(w)
+                    if j is not None:
+                        refined[j] += 0.5 * float(f)
+                for w, f in freq_dict_cn.items():
+                    j = word2pos.get(w)
+                    if j is not None:
+                        refined[j] += 0.5 * float(f)
+                refined = refined / (refined.sum() + 1e-8)
                 
-                # Create aligned distributions
-                current_aligned = torch.zeros(vocab_size, dtype=torch.float64).cuda()
-                refined_aligned = torch.zeros(vocab_size, dtype=torch.float64).cuda()
+                # Cost matrix from embeddings (fp32 on dev)
+                cost_M = compute_embedding_cost_matrix_from_precomputed(union_words, model)
+                cost_M = _ensure_fp32(cost_M, dev)
                 
-                # Map distributions to aligned vectors
-                for idx, word in enumerate(all_words):
-                    current_aligned[idx] = current_word_prob.get(word, 0.0)
-                    refined_aligned[idx] = refined_word_prob.get(word, 0.0)
-                
-                # Ensure proper normalization (they should already sum to ~1, but numerical safety)
-                if current_aligned.sum() > 0:
-                    current_aligned = current_aligned / current_aligned.sum()
-                if refined_aligned.sum() > 0:
-                    refined_aligned = refined_aligned / refined_aligned.sum()
-                
-                # Compute cost matrix using pre-computed word embeddings
-                cost_M = compute_embedding_cost_matrix_from_precomputed(all_words, model)
                 try:
-                    dist = ot.emd2(current_aligned, refined_aligned, cost_M)
-                    ot_dists[i] = dist
+                    # Use differentiable Sinkhorn (squared Wasserstein)
+                    cost = ot.bregman.sinkhorn2(current.unsqueeze(0), refined.unsqueeze(0), cost_M, reg=reg)
+                    ot_dists[i] = cost.squeeze()
                 except Exception as e:
                     print(f"Warning: OT computation failed for topic {i}: {e}")
                     ot_dists[i] = 0.0
@@ -111,20 +119,16 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
         else:
             ot_dists[i] = 0.0
     
-    # Compute topic weights based on refinement confidence
-    topic_weights = torch.zeros(size=(num_topics,)).cuda()
-    for i in range(num_topics):
-        if i < len(refined_topics):
-            total_words = refined_topics[i]['total_refined_words_en'] + refined_topics[i]['total_refined_words_cn']
-            if total_words > 0:
-                confidence = refined_topics[i]['refinement_rounds_completed'] / refined_topics[i]['num_refinements']
-                topic_weights[i] = torch.tensor(confidence).cuda()
-            else:
-                topic_weights[i] = 0.0
-        else:
-            topic_weights[i] = 0.0
+    # Topic weights from refinement progress (no grad needed)
+    topic_weights = torch.zeros(num_topics, device=dev, dtype=torch.float32)
+    for i in range(min(num_topics, len(refined_topics))):
+        total_words = refined_topics[i]['total_refined_words_en'] + refined_topics[i]['total_refined_words_cn']
+        if total_words > 0:
+            num_ref = max(1, refined_topics[i]['num_refinements'])
+            conf = float(refined_topics[i]['refinement_rounds_completed']) / num_ref
+            topic_weights[i] = conf
     
-    return torch.sum(ot_dists * topic_weights)
+    return (ot_dists * topic_weights).sum()
 
 
 def compute_embedding_cost_matrix_from_precomputed(words, model):
@@ -138,8 +142,7 @@ def compute_embedding_cost_matrix_from_precomputed(words, model):
     Returns:
         cost_M: Cost matrix [len(words), len(words)]
     """
-    # Get embeddings for all words
-    # First, create a mapping from word to index in the vocabulary
+    dev = _torch_device_of(model, torch.device('cpu'))
     vocab_en = model.vocab_en
     vocab_cn = model.vocab_cn
 
@@ -159,7 +162,8 @@ def compute_embedding_cost_matrix_from_precomputed(words, model):
                 embeddings.append(emb[0])  # Take first (and only) embedding
             else:
                 # Fallback: use zero vector
-                embeddings.append(torch.zeros(model.word_embeddings_en.shape[1], dtype=torch.float64, device=model.word_embeddings_en.device))
+                emb_dim = model.word_embeddings_en.shape[1] if model.word_embeddings_en is not None else 768
+                embeddings.append(torch.zeros(emb_dim, dtype=torch.float32, device=dev))
         # Try Chinese vocab
         elif word in word_to_idx_cn:
             idx = word_to_idx_cn[word]
@@ -168,26 +172,20 @@ def compute_embedding_cost_matrix_from_precomputed(words, model):
                 embeddings.append(emb[0])  # Take first (and only) embedding
             else:
                 # Fallback: use zero vector
-                embeddings.append(torch.zeros(model.word_embeddings_cn.shape[1], dtype=torch.float64, device=model.word_embeddings_cn.device))
+                emb_dim = model.word_embeddings_cn.shape[1] if model.word_embeddings_cn is not None else 768
+                embeddings.append(torch.zeros(emb_dim, dtype=torch.float32, device=dev))
         else:
             # Word not found in either vocabulary - use zero vector
             emb_dim = model.word_embeddings_en.shape[1] if model.word_embeddings_en is not None else 768
-            embeddings.append(torch.zeros(emb_dim, dtype=torch.float64, device=next(model.parameters()).device))
+            embeddings.append(torch.zeros(emb_dim, dtype=torch.float32, device=dev))
 
-    # Stack embeddings
+    # Stack embeddings and ensure proper dtype/device
     embeddings_tensor = torch.stack(embeddings)
+    embeddings_tensor = _ensure_fp32(embeddings_tensor, dev)
 
-    # Compute cosine distance matrix
-    # Normalize embeddings
-    emb_norm = embeddings_tensor / (embeddings_tensor.norm(dim=1, keepdim=True) + 1e-8)
+    # Compute cosine distance matrix using F.normalize
+    emb_norm = F.normalize(embeddings_tensor, dim=1)
+    cos_sim = emb_norm @ emb_norm.T
+    cost_M = (1.0 - cos_sim).clamp_min(0.0)
 
-    # Cosine similarity matrix
-    cos_sim = torch.mm(emb_norm, emb_norm.t())
-
-    # Convert to distance (1 - cosine similarity)
-    cost_M = 1.0 - cos_sim
-
-    # Ensure non-negative and proper shape
-    cost_M = torch.clamp(cost_M, min=0.0)
-
-    return cost_M
+    return cost_M.to(device=dev, dtype=torch.float32)
