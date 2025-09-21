@@ -308,16 +308,7 @@ Focus on the most coherent and representative words from both languages for each
             topic_id = topic_data['topic_id']
             freq_dist_en = topic_data.get('normalized_freq_dist_en', {})
             freq_dist_cn = topic_data.get('normalized_freq_dist_cn', {})
-            
-            # Debug: Print frequency distribution info for first few topics
-            if topic_id < 3:
-                print(f"DEBUG Topic {topic_id}: EN freq_dist has {len(freq_dist_en)} words, CN has {len(freq_dist_cn)} words")
-                if len(freq_dist_en) > 0:
-                    max_freq_en = max(freq_dist_en.values())
-                    print(f"  EN max frequency: {max_freq_en:.4f}, min_threshold: {min_frequency}")
-                if len(freq_dist_cn) > 0:
-                    max_freq_cn = max(freq_dist_cn.values())
-                    print(f"  CN max frequency: {max_freq_cn:.4f}, min_threshold: {min_frequency}")
+
             
             # For English
             high_conf_words_en = [

@@ -34,7 +34,6 @@ def parse_args():
     parser.add_argument('--warmStep', default=0, type=int)
     parser.add_argument('--llm_itl', action='store_true')
     parser.add_argument('--llm_step', type=int, default=3)  # the number of epochs for llm refine
-    parser.add_argument('--refine_weight', type=float, default=200)
     parser.add_argument('--instruction', type=str, default='refine_labelTokenProbs',
                         choices=['refine_labelTokenProbs', 'refine_wordIntrusion'])
     parser.add_argument('--inference_bs', type=int, default=5)
@@ -45,9 +44,8 @@ def parse_args():
                         help='Google Gemini API key for cross-lingual topic refinement')
     parser.add_argument('--refinement_rounds', type=int, default=3,
                         help='Number of self-consistent refinement rounds (R)')
-    parser.add_argument('--min_frequency', type=float, default=0.01,
-                        help='Minimum frequency threshold for high-confidence words')
-    parser.add_argument('--refine_weight', type=float, default=0.0,
+
+    parser.add_argument('--refine_weight', type=float, default=1,
                         help='Weight for refinement loss (0 disables refinement loss)')
 
 
