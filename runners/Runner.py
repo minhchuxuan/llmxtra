@@ -88,8 +88,7 @@ class Runner:
                         topic_probas_en=topic_probas_en,
                         topic_probas_cn=topic_probas_cn,
                         api_key=self.args.gemini_api_key,
-                        R=getattr(self.args, 'refinement_rounds', 3),
-                        min_frequency=getattr(self.args, 'min_frequency', 0.01)  # Lower threshold: 1% instead of 10%
+                        R=getattr(self.args, 'refinement_rounds', 3)
                     )
 
                     print(f"Refined {len(refined_topics)} topics using cross-lingual refinement")

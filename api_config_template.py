@@ -7,5 +7,4 @@ GEMINI_API_KEY = "your_gemini_api_key_here"
 
 # Cross-lingual refinement settings
 REFINEMENT_ROUNDS = 3
-MIN_FREQUENCY = 0.1
 REFINE_WEIGHT = 200.0  # Weight for refinement loss

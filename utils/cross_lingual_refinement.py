@@ -289,14 +289,12 @@ Focus on the most coherent and representative words from both languages for each
     
     def get_high_confidence_words(self, 
                                   refined_topics: List[Dict], 
-                                  min_frequency: float = 0.1,
                                   top_k: int = 15) -> List[Dict]:
         """
-        Extract high-confidence words based on frequency threshold
+        Extract top-k high-confidence words based on frequency ranking
         
         Args:
             refined_topics: List of refined topic dictionaries
-            min_frequency: Minimum normalized frequency threshold
             top_k: Maximum number of words to return per topic
             
         Returns:
@@ -310,18 +308,16 @@ Focus on the most coherent and representative words from both languages for each
             freq_dist_cn = topic_data.get('normalized_freq_dist_cn', {})
 
             
-            # For English
+            # For English - take top_k words by frequency
             high_conf_words_en = [
-                (word, freq) for word, freq in freq_dist_en.items() 
-                if freq >= min_frequency
+                (word, freq) for word, freq in freq_dist_en.items()
             ]
             high_conf_words_en.sort(key=lambda x: x[1], reverse=True)
             high_conf_words_en = high_conf_words_en[:top_k]
             
-            # For Chinese
+            # For Chinese - take top_k words by frequency
             high_conf_words_cn = [
-                (word, freq) for word, freq in freq_dist_cn.items() 
-                if freq >= min_frequency
+                (word, freq) for word, freq in freq_dist_cn.items()
             ]
             high_conf_words_cn.sort(key=lambda x: x[1], reverse=True)
             high_conf_words_cn = high_conf_words_cn[:top_k]
@@ -346,8 +342,7 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
                                 topic_probas_en: torch.Tensor,
                                 topic_probas_cn: torch.Tensor,
                                 api_key: str,
-                                R: int = 3,
-                                min_frequency: float = 0.1) -> Tuple[List[Dict], List[Dict]]:
+                                R: int = 3) -> Tuple[List[Dict], List[Dict]]:
     """
     Main function to perform cross-lingual topic refinement for all topics at once
 
@@ -363,7 +358,6 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
         topic_probas_cn: Chinese topic probabilities [50, 15] (top 15 words)
         api_key: Gemini API key
         R: Number of refinement rounds
-        min_frequency: Minimum frequency threshold for high-confidence words
 
     Returns:
         Tuple of (refined_topics, high_confidence_topics)
@@ -377,7 +371,7 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
     
     # Extract high-confidence words based on frequency
     high_confidence_topics = refiner.get_high_confidence_words(
-        refined_topics, min_frequency=min_frequency, top_k=15
+        refined_topics, top_k=15
     )
     
     return refined_topics, high_confidence_topics
