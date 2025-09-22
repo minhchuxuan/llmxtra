@@ -85,107 +85,145 @@ class CrossLingualTopicRefiner:
     
     def create_refinement_prompt(self, topic_words_en: List[str], topic_words_cn: List[str]) -> str:
         """
-        Create prompt for refining all topics at once
+        Create prompt for ID-based topic refinement (closed-world selection)
 
         Args:
             topic_words_en: List of English topic word strings (each with 50 words vocabulary)
             topic_words_cn: List of Chinese topic word strings (each with 50 words vocabulary)
 
         Returns:
-            Formatted prompt string for all topics
+            Formatted prompt string for all topics with enumerated candidates
         """
         num_topics = len(topic_words_en)
+        min_support_per_lang = 3
 
-        prompt = f"""Given the following cross-lingual topic words from English and Chinese for {num_topics} topics, please refine and improve each topic by:
+        header = f"""STRICT TOPIC REFINEMENT — ID SELECTION ONLY
 
-1. For each topic, we provide a vocabulary of top 50 words from each language.
-2. The top 15 words from each language are the most probable (first 15 in the list) and represent the current topic theme.
-3. Identify the main theme that connects these top 15 words across both languages for each topic
-4. Remove any irrelevant or noisy words from the top 15 that don't fit the coherent theme
-5. Add relevant words from the full top 50 vocabulary list that strengthen the topic coherence
-6. Ensure each refined topic has exactly 15 words per language that maintain good cross-lingual representation
+You will process {num_topics} topics. For each topic:
+- Identify a brief theme string.
+- Select ≥{min_support_per_lang} EN IDs and ≥{min_support_per_lang} CN IDs.
+- IDs MUST come only from the enumerated candidate lists.
+- IDs must be integers, unique within each language, and in range.
+- Output MUST be valid JSON, with no extra text, no markdown fences, no comments.
 
-"""
-
-        # Add all topics to the prompt
-        for k in range(num_topics):
-            top_50_en = topic_words_en[k].split()
-            top_50_cn = topic_words_cn[k].split()
-
-            words_en_str = ", ".join(top_50_en)
-            words_cn_str = ", ".join(top_50_cn)
-
-            prompt += f"""
-Topic {k}:
-English top 50 words: {words_en_str}
-Chinese top 50 words: {words_cn_str}
-"""
-
-        prompt += f"""
-
-Please provide your response in the following JSON format for ALL {num_topics} topics:
+Return exactly one JSON object of the form:
 {{
-    "topics": [
-        {{
-            "topic_id": 0,
-            "topic_theme": "brief description of topic 0 theme",
-            "refined_words_en": ["word1", "word2", ..., "word15"],
-            "refined_words_cn": ["word1", "word2", ..., "word15"],
-            "removed_words": ["removed1", "removed2", ...],
-            "added_words": ["added1", "added2", ...]
-        }},
-        {{
-            "topic_id": 1,
-            "topic_theme": "brief description of topic 1 theme",
-            "refined_words_en": ["word1", "word2", ..., "word15"],
-            "refined_words_cn": ["word1", "word2", ..., "word15"],
-            "removed_words": ["removed1", "removed2", ...],
-            "added_words": ["added1", "added2", ...]
-        }},
-        // ... continue for all {num_topics} topics
-    ]
+  "topics": [
+    {{"topic_id": 0, "theme": "string", "selected_ids_en": [0,1,2], "selected_ids_cn": [0,1,2]}},
+    {{"topic_id": 1, "theme": "string", "selected_ids_en": [0,1,2], "selected_ids_cn": [0,1,2]}}
+  ]
 }}
-
-Focus on the most coherent and representative words from both languages for each topic.
 """
-        return prompt
+
+        body = []
+        for k in range(num_topics):
+            en_list = topic_words_en[k].split()
+            cn_list = topic_words_cn[k].split()
+
+            en_block = " ".join(f"[{i}] {w}," for i, w in enumerate(en_list)).rstrip(",")
+            cn_block = " ".join(f"[{i}] {w}," for i, w in enumerate(cn_list)).rstrip(",")
+
+            body.append(
+                f"\nTOPIC {k}\nEN_CANDIDATES:\n{en_block}\nCN_CANDIDATES:\n{cn_block}\n"
+            )
+
+        return header + "".join(body)
     
-    def call_gemini_api(self, prompt: str, max_retries: int = 3) -> List[Dict]:
+    def call_gemini_api(self, prompt: str, candidate_lists: List[Tuple[List[str], List[str]]], max_retries: int = 3) -> List[Dict]:
         """
-        Call Gemini API with retry logic for multiple topics
+        Call Gemini API with strict ID-based validation
         
         Args:
             prompt: Input prompt containing all topics
+            candidate_lists: List of (en_candidates, cn_candidates) for validation
             max_retries: Maximum number of retries
             
         Returns:
-            List of parsed response dictionaries for each topic
+            List of validated topic results with materialized words
         """
+        min_support_per_lang = 3
+        
+        # Force JSON-only responses from Gemini
+        gen_cfg = genai.types.GenerationConfig(
+            temperature=0.2,
+            top_p=0.9,
+            max_output_tokens=8000,
+            response_mime_type="application/json",
+        )
+        
         for attempt in range(max_retries):
             try:
-                response = self.model.generate_content(prompt)
-                
-                # Extract JSON from response
+                response = self.model.generate_content(prompt, generation_config=gen_cfg)
                 response_text = response.text
                 
-                # Try to find JSON in the response
-                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group()
-                    result = json.loads(json_str)
+                # Parse pure JSON response (guaranteed by response_mime_type)
+                result = json.loads(response_text)
+                
+                if not isinstance(result, dict) or 'topics' not in result:
+                    raise RuntimeError("Missing 'topics' key in response")
                     
-                    # Check if result has the expected structure
-                    if 'topics' in result and isinstance(result['topics'], list):
-                        return result['topics']
-                    else:
-                        print(f"Unexpected JSON structure: {result}")
+                topics = result['topics']
+                if not isinstance(topics, list):
+                    raise RuntimeError("'topics' must be a list")
+                
+                validated_topics = []
+                for topic_data in topics:
+                    if not isinstance(topic_data, dict):
+                        raise RuntimeError("Each topic must be a dict")
+                    
+                    # Extract and validate required fields
+                    topic_id = topic_data.get('topic_id')
+                    theme = topic_data.get('theme', '')
+                    selected_ids_en = topic_data.get('selected_ids_en', [])
+                    selected_ids_cn = topic_data.get('selected_ids_cn', [])
+                    
+                    if not isinstance(topic_id, int) or topic_id < 0 or topic_id >= len(candidate_lists):
+                        raise RuntimeError(f"Invalid topic_id: {topic_id}")
+                    
+                    if not isinstance(selected_ids_en, list) or not isinstance(selected_ids_cn, list):
+                        raise RuntimeError(f"selected_ids must be lists for topic {topic_id}")
+                    
+                    en_candidates, cn_candidates = candidate_lists[topic_id]
+                    
+                    # Validate EN IDs
+                    if not all(isinstance(id_, int) for id_ in selected_ids_en):
+                        raise RuntimeError(f"All EN IDs must be integers for topic {topic_id}")
+                    if not all(0 <= id_ < len(en_candidates) for id_ in selected_ids_en):
+                        raise RuntimeError(f"EN IDs out of range [0, {len(en_candidates)-1}] for topic {topic_id}")
+                    if len(set(selected_ids_en)) != len(selected_ids_en):
+                        raise RuntimeError(f"Duplicate EN IDs for topic {topic_id}")
+                    if len(selected_ids_en) < min_support_per_lang:
+                        raise RuntimeError(f"Too few EN words ({len(selected_ids_en)} < {min_support_per_lang}) for topic {topic_id}")
+                    
+                    # Validate CN IDs
+                    if not all(isinstance(id_, int) for id_ in selected_ids_cn):
+                        raise RuntimeError(f"All CN IDs must be integers for topic {topic_id}")
+                    if not all(0 <= id_ < len(cn_candidates) for id_ in selected_ids_cn):
+                        raise RuntimeError(f"CN IDs out of range [0, {len(cn_candidates)-1}] for topic {topic_id}")
+                    if len(set(selected_ids_cn)) != len(selected_ids_cn):
+                        raise RuntimeError(f"Duplicate CN IDs for topic {topic_id}")
+                    if len(selected_ids_cn) < min_support_per_lang:
+                        raise RuntimeError(f"Too few CN words ({len(selected_ids_cn)} < {min_support_per_lang}) for topic {topic_id}")
+                    
+                    # Materialize words by index lookup
+                    ref_words_en = [en_candidates[i] for i in selected_ids_en]
+                    ref_words_cn = [cn_candidates[i] for i in selected_ids_cn]
+                    
+                    validated_topics.append({
+                        'topic_id': topic_id,
+                        'theme': theme,
+                        'refined_words_en': ref_words_en,  # Keep original field names for compatibility
+                        'refined_words_cn': ref_words_cn
+                    })
+                
+                return validated_topics
                         
             except Exception as e:
                 print(f"API call attempt {attempt + 1} failed: {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(1)  # Wait before retry
+                    time.sleep(1)
                     
-        return None
+        raise RuntimeError("All API attempts failed with validation errors")
     
     def self_consistent_refinement(self,
                                    topic_words_en: List[str],
@@ -226,42 +264,49 @@ Focus on the most coherent and representative words from both languages for each
         
         print(f"Starting refinement for {num_topics} topics with {R} rounds...")
         
+        # Build candidate lists for validation
+        candidate_lists = []
+        for k in range(num_topics):
+            en_candidates = topic_words_en[k].split()
+            cn_candidates = topic_words_cn[k].split()
+            candidate_lists.append((en_candidates, cn_candidates))
+        
         for r in range(R):
             print(f"Refinement round {r+1}/{R} for all topics...")
             
             # Create prompt for all topics
             prompt = self.create_refinement_prompt(topic_words_en, topic_words_cn)
-            result = self.call_gemini_api(prompt)
             
-            print(f"Round {r+1}: API result type: {type(result)}, length: {len(result) if result else 'None'}")
-            
-            if result and isinstance(result, list):
-                print(f"Round {r+1}: Got refinement results for {len(result)} topics")
+            try:
+                result = self.call_gemini_api(prompt, candidate_lists)
+                if len(result) != num_topics:
+                    raise RuntimeError(f"[Refine] Round {r+1}: got {len(result)} topics, expected {num_topics}.")
+                print(f"Round {r+1}: Got validated results for {len(result)} topics")
                 
-                # Process results for each topic
+                # Process validated results (words are already materialized and guaranteed in-vocab)
                 for topic_result in result:
-                    if isinstance(topic_result, dict) and 'topic_id' in topic_result:
-                        topic_id = topic_result['topic_id']
-                        
-                        if topic_id < num_topics:
-                            # Extract refined words
-                            refined_words_en = topic_result.get('refined_words_en', [])
-                            refined_words_cn = topic_result.get('refined_words_cn', [])
-                            
-                            # Update word counts
-                            for word in refined_words_en:
-                                refined_topics[topic_id]['refined_word_counts_en'][word] = \
-                                    refined_topics[topic_id]['refined_word_counts_en'].get(word, 0) + 1
-                            
-                            for word in refined_words_cn:
-                                refined_topics[topic_id]['refined_word_counts_cn'][word] = \
-                                    refined_topics[topic_id]['refined_word_counts_cn'].get(word, 0) + 1
-                            
-                            # Store refinement details
-                            refined_topics[topic_id]['refinement_details'].append(topic_result)
-                            refined_topics[topic_id]['refinement_rounds_completed'] += 1
-            else:
-                print(f"Round {r+1}: Failed to get valid results")
+                    topic_id = topic_result['topic_id']
+                    
+                    # Extract refined words (already validated and materialized)
+                    refined_words_en = topic_result['refined_words_en']
+                    refined_words_cn = topic_result['refined_words_cn']
+                    
+                    # Update word counts
+                    for word in refined_words_en:
+                        refined_topics[topic_id]['refined_word_counts_en'][word] = \
+                            refined_topics[topic_id]['refined_word_counts_en'].get(word, 0) + 1
+                    
+                    for word in refined_words_cn:
+                        refined_topics[topic_id]['refined_word_counts_cn'][word] = \
+                            refined_topics[topic_id]['refined_word_counts_cn'].get(word, 0) + 1
+                    
+                    # Store refinement details
+                    refined_topics[topic_id]['refinement_details'].append(topic_result)
+                    refined_topics[topic_id]['refinement_rounds_completed'] += 1
+                    
+            except RuntimeError as e:
+                print(f"Round {r+1}: Validation failed - {e}")
+                raise RuntimeError(f"[Refine] Round {r+1} failed: {e}")
         
         # Calculate final statistics for each topic
         for k in range(num_topics):
@@ -322,14 +367,25 @@ Focus on the most coherent and representative words from both languages for each
             high_conf_words_cn.sort(key=lambda x: x[1], reverse=True)
             high_conf_words_cn = high_conf_words_cn[:top_k]
             
+            # Enforce minimum usable support per language per topic
+            min_support_per_lang = 2  # must match the OT MIN_SUPPORT_PER_TOPIC
+            en_words = [word for word, freq in high_conf_words_en]
+            cn_words = [word for word, freq in high_conf_words_cn]
+            
+            if len(en_words) < min_support_per_lang and len(cn_words) < min_support_per_lang:
+                raise RuntimeError(
+                    f"[Refine] Topic {topic_id}: insufficient high-confidence words "
+                    f"(EN={len(en_words)}, CN={len(cn_words)}; need ≥{min_support_per_lang} on at least one side)"
+                )
+            
             high_confidence_topic = {
                 'topic_id': topic_id,
-                'high_confidence_words_en': [word for word, freq in high_conf_words_en],
-                'high_confidence_words_cn': [word for word, freq in high_conf_words_cn],
+                'high_confidence_words_en': en_words,
+                'high_confidence_words_cn': cn_words,
                 'word_frequencies_en': dict(high_conf_words_en),
                 'word_frequencies_cn': dict(high_conf_words_cn),
-                'num_high_conf_words_en': len(high_conf_words_en),
-                'num_high_conf_words_cn': len(high_conf_words_cn)
+                'num_high_conf_words_en': len(en_words),
+                'num_high_conf_words_cn': len(cn_words)
             }
             
             high_confidence_topics.append(high_confidence_topic)

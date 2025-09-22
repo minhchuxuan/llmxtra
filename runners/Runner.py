@@ -59,34 +59,34 @@ class Runner:
                 # Step 1: Extract top-k words using torch.topk for each topic
                 topk = 15  # Number of top words to keep
                 
-                # For English topics
+                # For English topics - store indices for later fresh computation
                 top_values_en, top_indices_en = torch.topk(beta_en, topk, dim=1)
-                # Step 2: Rescale probabilities to sum to 1 using torch.div
-                topic_probas_en = torch.div(top_values_en, top_values_en.sum(dim=1, keepdim=True))
                 
-                # For Chinese topics  
+                # For Chinese topics - store indices for later fresh computation  
                 top_values_cn, top_indices_cn = torch.topk(beta_cn, topk, dim=1)
-                # Step 2: Rescale probabilities to sum to 1 using torch.div
-                topic_probas_cn = torch.div(top_values_cn, top_values_cn.sum(dim=1, keepdim=True))
                 
-                print(f"Created clean probability distributions over top {topk} words")
-                print(f"English topic_probas shape: {topic_probas_en.shape}")
-                print(f"Chinese topic_probas shape: {topic_probas_cn.shape}")
-
                 # Store vocabulary indices for loss computation
                 self.topic_indices_en = top_indices_en
                 self.topic_indices_cn = top_indices_cn
+                
+                print(f"Extracted top {topk} word indices for each topic")
+                print(f"English topic indices shape: {top_indices_en.shape}")
+                print(f"Chinese topic indices shape: {top_indices_cn.shape}")
                 
                 # Cross-lingual topic refinement using Gemini API
                 refined_topics, high_confidence_topics = None, None
                 if hasattr(self.args, 'gemini_api_key') and self.args.gemini_api_key:
                     print("Starting cross-lingual topic refinement...")
+                    
+                    # Compute probabilities for refinement (detached for API call)
+                    topic_probas_en_for_refinement = torch.div(top_values_en, top_values_en.sum(dim=1, keepdim=True)).detach()
+                    topic_probas_cn_for_refinement = torch.div(top_values_cn, top_values_cn.sum(dim=1, keepdim=True)).detach()
 
                     refined_topics, high_confidence_topics = refine_cross_lingual_topics(
                         topic_words_en=topic_words_en,
                         topic_words_cn=topic_words_cn,
-                        topic_probas_en=topic_probas_en,
-                        topic_probas_cn=topic_probas_cn,
+                        topic_probas_en=topic_probas_en_for_refinement,
+                        topic_probas_cn=topic_probas_cn_for_refinement,
                         api_key=self.args.gemini_api_key,
                         R=getattr(self.args, 'refinement_rounds', 3)
                     )
@@ -138,10 +138,21 @@ class Runner:
                     hasattr(self.args, 'refine_weight') and
                     self.args.refine_weight > 0):
 
-                    # Ensure consistent device/dtype for OT inputs
+                    # Compute fresh probabilities from current beta for this batch
                     dev = self.device
-                    topic_probas_en_ot = topic_probas_en.to(dev, dtype=torch.float32)
-                    topic_probas_cn_ot = topic_probas_cn.to(dev, dtype=torch.float32)
+                    current_beta_en, current_beta_cn = self.model.get_beta()
+                    
+                    # Extract probabilities for the same top-k indices identified during refinement
+                    current_topic_probas_en = torch.gather(current_beta_en, 1, self.topic_indices_en)
+                    current_topic_probas_cn = torch.gather(current_beta_cn, 1, self.topic_indices_cn)
+                    
+                    # Renormalize to ensure they sum to 1
+                    current_topic_probas_en = torch.div(current_topic_probas_en, current_topic_probas_en.sum(dim=1, keepdim=True))
+                    current_topic_probas_cn = torch.div(current_topic_probas_cn, current_topic_probas_cn.sum(dim=1, keepdim=True))
+                    
+                    # Ensure consistent device/dtype for OT inputs
+                    topic_probas_en_ot = current_topic_probas_en.to(dev, dtype=torch.float32)
+                    topic_probas_cn_ot = current_topic_probas_cn.to(dev, dtype=torch.float32)
                     
                     refine_loss = compute_cross_lingual_refine_loss(
                         topic_probas_en=topic_probas_en_ot,
@@ -155,10 +166,11 @@ class Runner:
                         model=self.model
                     )
                     
-                    if refine_loss.detach().item() > 0:
-                        weighted_refine_loss = self.args.refine_weight * refine_loss
-                        batch_loss = batch_loss + weighted_refine_loss
-                        rst_dict['refine_loss'] = refine_loss.detach()
+                    # Always apply refinement loss with non-zero weight
+                    weighted_refine_loss = self.args.refine_weight * refine_loss
+                    batch_loss = batch_loss + weighted_refine_loss
+                    rst_dict['refine_loss'] = refine_loss.detach()
+                    rst_dict['weighted_refine_loss'] = weighted_refine_loss.detach()
 
                 for key in rst_dict:
                     if 'loss' in key:

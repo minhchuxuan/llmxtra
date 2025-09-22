@@ -2,11 +2,13 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import ot
-from ot.backend import set_default_backend
 import warnings
 
-# Enforce single Torch backend for POT (no backend drift)
-set_default_backend("torch")
+# Note: POT automatically detects torch tensors and uses torch backend
+# No explicit backend setting needed - POT handles this internally
+
+# Constants for minimum support validation
+MIN_SUPPORT_PER_TOPIC = 2  # Minimum total words needed for meaningful OT
 
 
 def _torch_device_of(model, fallback):
@@ -82,6 +84,11 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
             
             union_words = list({*en_words, *cn_words, *refined_words_en, *refined_words_cn})
             V = len(union_words)
+            
+            # Assert all union words are in vocabulary (strict contract enforcement)
+            assert all(w in vocab_en or w in vocab_cn for w in union_words), \
+                f"OOV words found in union for topic {i}: {[w for w in union_words if w not in vocab_en and w not in vocab_cn]}"
+            
             word2pos = {w: j for j, w in enumerate(union_words)}
             
             # Current distribution (tensor, gradient flows from en_probs/cn_probs)
@@ -107,63 +114,67 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
                         refined[j] += 0.5 * float(f)
                 refined = refined / (refined.sum() + 1e-8)
                 
-                # Minimal support check: need >= 2 bins with mass on each side for meaningful transport
-                if (current > 0).sum() < 2 or (refined > 0).sum() < 2:
-                    # Skip with zero penalty for invalid transport regime
-                    ot_dists[i] = torch.tensor(0.0, device=dev, dtype=torch.float32)
-                else:
-                    # Cost matrix from embeddings (fp32 on dev)
-                    cost_M = compute_embedding_cost_matrix_from_precomputed(union_words, model)
-                    cost_M = _ensure_fp32(cost_M, dev)
-                    
-                    # === Strict invariants before OT ===
-                    # current, refined: 1-D, non-negative, float32, on the same device
-                    current = current.to(dtype=torch.float32, device=dev).clamp_min(0)
-                    refined = refined.to(dtype=torch.float32, device=dev).clamp_min(0)
+                # Enforce minimum support for meaningful transport
+                current_support = (current > 0).sum().item()
+                refined_support = (refined > 0).sum().item()
+                
+                if current_support < MIN_SUPPORT_PER_TOPIC or refined_support < MIN_SUPPORT_PER_TOPIC:
+                    raise RuntimeError(
+                        f"[OT] Topic {i}: insufficient support (current={current_support}, refined={refined_support}, need ≥{MIN_SUPPORT_PER_TOPIC})"
+                    )
+                
+                # Cost matrix from embeddings (fp32 on dev)
+                cost_M = compute_embedding_cost_matrix_from_precomputed(union_words, model)
+                cost_M = _ensure_fp32(cost_M, dev)
+                
+                # === Strict invariants before OT ===
+                # current, refined: 1-D, non-negative, float32, on the same device
+                current = current.to(dtype=torch.float32, device=dev).clamp_min(0)
+                refined = refined.to(dtype=torch.float32, device=dev).clamp_min(0)
 
-                    # Ensure both have identical support size V and cost is V×V on the same device
-                    if refined.numel() != V:
-                        raise RuntimeError(f"[OT] Histogram length mismatch: current={V}, refined={refined.numel()}.")
+                # Ensure both have identical support size V and cost is V×V on the same device
+                if refined.numel() != V:
+                    raise RuntimeError(f"[OT] Histogram length mismatch: current={V}, refined={refined.numel()}.")
 
-                    M = cost_M.to(dtype=torch.float32, device=dev)
-                    if M.dim() != 2 or M.shape[0] != V or M.shape[1] != V:
-                        raise RuntimeError(f"[OT] Cost shape invalid: got {tuple(M.shape)}, expected ({V},{V}).")
+                M = cost_M.to(dtype=torch.float32, device=dev)
+                if M.dim() != 2 or M.shape[0] != V or M.shape[1] != V:
+                    raise RuntimeError(f"[OT] Cost shape invalid: got {tuple(M.shape)}, expected ({V},{V}).")
 
-                    # Clean/normalize distributions (strictly 1-D)
-                    csum = current.sum()
-                    rsum = refined.sum()
-                    if csum <= 0 or not torch.isfinite(csum):
-                        raise RuntimeError("[OT] Current histogram has zero/invalid mass.")
-                    if rsum <= 0 or not torch.isfinite(rsum):
-                        raise RuntimeError("[OT] Refined histogram has zero/invalid mass.")
+                # Clean/normalize distributions (strictly 1-D)
+                csum = current.sum()
+                rsum = refined.sum()
+                if csum <= 0 or not torch.isfinite(csum):
+                    raise RuntimeError("[OT] Current histogram has zero/invalid mass.")
+                if rsum <= 0 or not torch.isfinite(rsum):
+                    raise RuntimeError("[OT] Refined histogram has zero/invalid mass.")
 
-                    a = (current / csum).contiguous()     # shape (V,)
-                    b = (refined / rsum).contiguous()     # shape (V,)
+                a = (current / csum).contiguous()     # shape (V,)
+                b = (refined / rsum).contiguous()     # shape (V,)
 
-                    # Cost matrix numeric hygiene
-                    if not torch.isfinite(M).all():
-                        raise RuntimeError("[OT] Cost matrix contains non-finite values.")
-                    # Keep distance non-negative and diagonal well-defined
-                    M = M.clamp_min(0.0)
-                    with torch.no_grad():
-                        M.fill_diagonal_(0.0)
+                # Cost matrix numeric hygiene
+                if not torch.isfinite(M).all():
+                    raise RuntimeError("[OT] Cost matrix contains non-finite values.")
+                # Keep distance non-negative and diagonal well-defined
+                M = M.clamp_min(0.0)
+                with torch.no_grad():
+                    M.fill_diagonal_(0.0)
 
-                    # Entropic regularization (fixed, explicit)
-                    if reg <= 0:
-                        raise RuntimeError("[OT] reg must be > 0.")
+                # Entropic regularization (fixed, explicit)
+                if reg <= 0:
+                    raise RuntimeError("[OT] reg must be > 0.")
 
-                    # === Call Sinkhorn with 1-D histograms ===
-                    # NOTE: DO NOT unsqueeze here; we want pure 1-D histograms, (V,) each.
-                    cost_val = ot.bregman.sinkhorn2(a, b, M, reg=reg)
-                    if cost_val.dim() != 0:   # ensure scalar
-                        cost_val = cost_val.squeeze()
+                # === Call Sinkhorn with 1-D histograms ===
+                # NOTE: DO NOT unsqueeze here; we want pure 1-D histograms, (V,) each.
+                cost_val = ot.bregman.sinkhorn2(a, b, M, reg=reg)
+                if cost_val.dim() != 0:   # ensure scalar
+                    cost_val = cost_val.squeeze()
 
-                    # store cost_val downstream (no detach; keep graph)
-                    ot_dists[i] = cost_val.to(dtype=torch.float32, device=dev)
+                # store cost_val downstream (no detach; keep graph)
+                ot_dists[i] = cost_val.to(dtype=torch.float32, device=dev)
             else:
-                ot_dists[i] = torch.tensor(0.0, device=dev, dtype=torch.float32)
+                raise RuntimeError(f"[OT] Topic {i}: empty frequency dictionaries (EN={len(freq_dict_en)}, CN={len(freq_dict_cn)})")
         else:
-            ot_dists[i] = torch.tensor(0.0, device=dev, dtype=torch.float32)
+            raise RuntimeError(f"[OT] Topic {i}: empty high-confidence word lists")
     
     # Topic weights from refinement progress (no grad needed)
     topic_weights = torch.zeros(num_topics, device=dev, dtype=torch.float32)
@@ -180,6 +191,7 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
 def compute_embedding_cost_matrix_from_precomputed(words, model):
     """
     Compute cost matrix between words using pre-computed word embeddings.
+    Requires all words to have valid embeddings - no zero-vector fallbacks.
 
     Args:
         words: List of words (same list for both dimensions since it's symmetric)
@@ -189,56 +201,35 @@ def compute_embedding_cost_matrix_from_precomputed(words, model):
         cost_M: Cost matrix [len(words), len(words)]
     """
     dev = _torch_device_of(model, torch.device('cpu'))
+    
+    # Strict validation of embedding availability
+    if (model.word_embeddings_en is None or model.word_embeddings_cn is None):
+        raise RuntimeError("Cross-lingual OT requires precomputed EN/CN embeddings.")
+    if model.word_embeddings_en.shape[1] != model.word_embeddings_cn.shape[1]:
+        raise RuntimeError("EN/CN embedding dimensions must match.")
+
     vocab_en = model.vocab_en
     vocab_cn = model.vocab_cn
+    w2i_en = {w: i for i, w in enumerate(vocab_en)}
+    w2i_cn = {w: i for i, w in enumerate(vocab_cn)}
 
-    # Create word to index mapping
-    word_to_idx_en = {word: idx for idx, word in enumerate(vocab_en)}
-    word_to_idx_cn = {word: idx for idx, word in enumerate(vocab_cn)}
-
-    # Get embeddings for all words
     embeddings = []
-
-    for word in words:
-        # Try to find word in English vocab first
-        if word in word_to_idx_en:
-            idx = word_to_idx_en[word]
-            emb = model.get_word_embedding([idx], lang='en')
-            if emb is not None:
-                embeddings.append(emb[0])  # Take first (and only) embedding
-            else:
-                # Fallback: use zero vector
-                emb_dim = model.word_embeddings_en.shape[1] if model.word_embeddings_en is not None else 768
-                embeddings.append(torch.zeros(emb_dim, dtype=torch.float32, device=dev))
-        # Try Chinese vocab
-        elif word in word_to_idx_cn:
-            idx = word_to_idx_cn[word]
-            emb = model.get_word_embedding([idx], lang='cn')
-            if emb is not None:
-                embeddings.append(emb[0])  # Take first (and only) embedding
-            else:
-                # Fallback: use zero vector
-                emb_dim = model.word_embeddings_cn.shape[1] if model.word_embeddings_cn is not None else 768
-                embeddings.append(torch.zeros(emb_dim, dtype=torch.float32, device=dev))
+    for w in words:
+        if w in w2i_en:
+            emb = model.get_word_embedding([w2i_en[w]], lang='en')[0]
+        elif w in w2i_cn:
+            emb = model.get_word_embedding([w2i_cn[w]], lang='cn')[0]
         else:
-            # Word not found in either vocabulary - use zero vector
-            emb_dim = model.word_embeddings_en.shape[1] if model.word_embeddings_en is not None else 768
-            embeddings.append(torch.zeros(emb_dim, dtype=torch.float32, device=dev))
+            raise RuntimeError(f"Word '{w}' not found in EN or CN vocabulary.")
+        
+        if emb is None or not torch.isfinite(emb).all():
+            raise RuntimeError(f"Invalid embedding for word '{w}'.")
+        embeddings.append(emb.to(dev, dtype=torch.float32))
 
-    # Stack embeddings and ensure proper dtype/device
-    embeddings_tensor = torch.stack(embeddings)
-    embeddings_tensor = _ensure_fp32(embeddings_tensor, dev)
-
-    # Normalize embeddings → cosine distance in [0, 2] (we clamp to [0, 1] effectively)
-    emb = F.normalize(embeddings_tensor.to(dtype=torch.float32), dim=1)
-    cos = emb @ emb.T
-    cost_M = (1.0 - cos).clamp_min(0.0).to(dtype=torch.float32)
-
-    # Ensure numeric sanity and exact shape
-    if not torch.isfinite(cost_M).all():
-        raise RuntimeError("[OT] Non-finite values found in cost matrix.")
-    cost_M = cost_M.contiguous()
-    with torch.no_grad():
-        cost_M.fill_diagonal_(0.0)
-
-    return cost_M.to(device=dev, dtype=torch.float32)
+    E = torch.stack(embeddings, dim=0)                      # [V, D]
+    E = torch.nn.functional.normalize(E, dim=1)             # unit vectors
+    M = 1.0 - (E @ E.T).clamp(min=-1.0, max=1.0)           # cosine distance
+    M.fill_diagonal_(0.0)
+    if not torch.isfinite(M).all():
+        raise RuntimeError("Non-finite values in cost matrix.")
+    return M
