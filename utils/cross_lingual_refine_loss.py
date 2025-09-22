@@ -2,7 +2,11 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import ot
+from ot.backend import set_default_backend
 import warnings
+
+# Enforce single Torch backend for POT (no backend drift)
+set_default_backend("torch")
 
 
 def _torch_device_of(model, fallback):
@@ -103,21 +107,63 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
                         refined[j] += 0.5 * float(f)
                 refined = refined / (refined.sum() + 1e-8)
                 
-                # Cost matrix from embeddings (fp32 on dev)
-                cost_M = compute_embedding_cost_matrix_from_precomputed(union_words, model)
-                cost_M = _ensure_fp32(cost_M, dev)
-                
-                try:
-                    # Use differentiable Sinkhorn (squared Wasserstein)
-                    cost = ot.bregman.sinkhorn2(current.unsqueeze(0), refined.unsqueeze(0), cost_M, reg=reg)
-                    ot_dists[i] = cost.squeeze()
-                except Exception as e:
-                    print(f"Warning: OT computation failed for topic {i}: {e}")
-                    ot_dists[i] = 0.0
+                # Minimal support check: need >= 2 bins with mass on each side for meaningful transport
+                if (current > 0).sum() < 2 or (refined > 0).sum() < 2:
+                    # Skip with zero penalty for invalid transport regime
+                    ot_dists[i] = torch.tensor(0.0, device=dev, dtype=torch.float32)
+                else:
+                    # Cost matrix from embeddings (fp32 on dev)
+                    cost_M = compute_embedding_cost_matrix_from_precomputed(union_words, model)
+                    cost_M = _ensure_fp32(cost_M, dev)
+                    
+                    # === Strict invariants before OT ===
+                    # current, refined: 1-D, non-negative, float32, on the same device
+                    current = current.to(dtype=torch.float32, device=dev).clamp_min(0)
+                    refined = refined.to(dtype=torch.float32, device=dev).clamp_min(0)
+
+                    # Ensure both have identical support size V and cost is V×V on the same device
+                    if refined.numel() != V:
+                        raise RuntimeError(f"[OT] Histogram length mismatch: current={V}, refined={refined.numel()}.")
+
+                    M = cost_M.to(dtype=torch.float32, device=dev)
+                    if M.dim() != 2 or M.shape[0] != V or M.shape[1] != V:
+                        raise RuntimeError(f"[OT] Cost shape invalid: got {tuple(M.shape)}, expected ({V},{V}).")
+
+                    # Clean/normalize distributions (strictly 1-D)
+                    csum = current.sum()
+                    rsum = refined.sum()
+                    if csum <= 0 or not torch.isfinite(csum):
+                        raise RuntimeError("[OT] Current histogram has zero/invalid mass.")
+                    if rsum <= 0 or not torch.isfinite(rsum):
+                        raise RuntimeError("[OT] Refined histogram has zero/invalid mass.")
+
+                    a = (current / csum).contiguous()     # shape (V,)
+                    b = (refined / rsum).contiguous()     # shape (V,)
+
+                    # Cost matrix numeric hygiene
+                    if not torch.isfinite(M).all():
+                        raise RuntimeError("[OT] Cost matrix contains non-finite values.")
+                    # Keep distance non-negative and diagonal well-defined
+                    M = M.clamp_min(0.0)
+                    with torch.no_grad():
+                        M.fill_diagonal_(0.0)
+
+                    # Entropic regularization (fixed, explicit)
+                    if reg <= 0:
+                        raise RuntimeError("[OT] reg must be > 0.")
+
+                    # === Call Sinkhorn with 1-D histograms ===
+                    # NOTE: DO NOT unsqueeze here; we want pure 1-D histograms, (V,) each.
+                    cost_val = ot.bregman.sinkhorn2(a, b, M, reg=reg)
+                    if cost_val.dim() != 0:   # ensure scalar
+                        cost_val = cost_val.squeeze()
+
+                    # store cost_val downstream (no detach; keep graph)
+                    ot_dists[i] = cost_val.to(dtype=torch.float32, device=dev)
             else:
-                ot_dists[i] = 0.0
+                ot_dists[i] = torch.tensor(0.0, device=dev, dtype=torch.float32)
         else:
-            ot_dists[i] = 0.0
+            ot_dists[i] = torch.tensor(0.0, device=dev, dtype=torch.float32)
     
     # Topic weights from refinement progress (no grad needed)
     topic_weights = torch.zeros(num_topics, device=dev, dtype=torch.float32)
@@ -183,9 +229,16 @@ def compute_embedding_cost_matrix_from_precomputed(words, model):
     embeddings_tensor = torch.stack(embeddings)
     embeddings_tensor = _ensure_fp32(embeddings_tensor, dev)
 
-    # Compute cosine distance matrix using F.normalize
-    emb_norm = F.normalize(embeddings_tensor, dim=1)
-    cos_sim = emb_norm @ emb_norm.T
-    cost_M = (1.0 - cos_sim).clamp_min(0.0)
+    # Normalize embeddings → cosine distance in [0, 2] (we clamp to [0, 1] effectively)
+    emb = F.normalize(embeddings_tensor.to(dtype=torch.float32), dim=1)
+    cos = emb @ emb.T
+    cost_M = (1.0 - cos).clamp_min(0.0).to(dtype=torch.float32)
+
+    # Ensure numeric sanity and exact shape
+    if not torch.isfinite(cost_M).all():
+        raise RuntimeError("[OT] Non-finite values found in cost matrix.")
+    cost_M = cost_M.contiguous()
+    with torch.no_grad():
+        cost_M.fill_diagonal_(0.0)
 
     return cost_M.to(device=dev, dtype=torch.float32)

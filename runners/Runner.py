@@ -138,26 +138,27 @@ class Runner:
                     hasattr(self.args, 'refine_weight') and
                     self.args.refine_weight > 0):
 
-                    try:
-                        refine_loss = compute_cross_lingual_refine_loss(
-                            topic_probas_en=topic_probas_en,
-                            topic_probas_cn=topic_probas_cn,
-                            topic_indices_en=self.topic_indices_en,
-                            topic_indices_cn=self.topic_indices_cn,
-                            refined_topics=refined_topics,
-                            high_confidence_topics=high_confidence_topics,
-                            vocab_en=self.model.vocab_en,
-                            vocab_cn=self.model.vocab_cn,
-                            model=self.model
-                        )
-                        
-                        if refine_loss.detach().item() > 0:
-                            weighted_refine_loss = self.args.refine_weight * refine_loss
-                            batch_loss = batch_loss + weighted_refine_loss
-                            rst_dict['refine_loss'] = refine_loss.detach()
-                            
-                    except Exception as e:
-                        print(f"Warning: Failed to compute refinement loss: {e}")
+                    # Ensure consistent device/dtype for OT inputs
+                    dev = self.device
+                    topic_probas_en_ot = topic_probas_en.to(dev, dtype=torch.float32)
+                    topic_probas_cn_ot = topic_probas_cn.to(dev, dtype=torch.float32)
+                    
+                    refine_loss = compute_cross_lingual_refine_loss(
+                        topic_probas_en=topic_probas_en_ot,
+                        topic_probas_cn=topic_probas_cn_ot,
+                        topic_indices_en=self.topic_indices_en,
+                        topic_indices_cn=self.topic_indices_cn,
+                        refined_topics=refined_topics,
+                        high_confidence_topics=high_confidence_topics,
+                        vocab_en=self.model.vocab_en,
+                        vocab_cn=self.model.vocab_cn,
+                        model=self.model
+                    )
+                    
+                    if refine_loss.detach().item() > 0:
+                        weighted_refine_loss = self.args.refine_weight * refine_loss
+                        batch_loss = batch_loss + weighted_refine_loss
+                        rst_dict['refine_loss'] = refine_loss.detach()
 
                 for key in rst_dict:
                     if 'loss' in key:
