@@ -49,15 +49,20 @@ class Runner:
             # Phase 2: Check if we should extract topic words
             print(self.args.warmStep)
             if epoch >= self.args.warmStep:
-                # Extract topic words from current beta
+                # Extract topic words from current beta - only top 15 for refinement
                 beta_en, beta_cn = self.model.get_beta()
+<<<<<<< Updated upstream
                 topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn)
                 print(f"Phase 2 - Epoch {epoch}: Extracted topic words")
+=======
+                topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn, topk_refine=15)
+                print(f"Phase 2 - Epoch {epoch}: Extracted top 15 topic words for refinement")
+>>>>>>> Stashed changes
                 print(f"English topic words: {len(topic_words_en)} topics")
                 print(f"Chinese topic words: {len(topic_words_cn)} topics")
                 
-                # Step 1: Extract top-k words using torch.topk for each topic
-                topk = 15  # Number of top words to keep
+                # Step 1: Extract top-k words using torch.topk for each topic (same as refinement count)
+                topk = 15  # Number of top words to keep - matches topk_refine for consistency
                 
                 # For English topics
                 top_values_en, top_indices_en = torch.topk(beta_en, topk, dim=1)
@@ -69,13 +74,24 @@ class Runner:
                 # Step 2: Rescale probabilities to sum to 1 using torch.div
                 topic_probas_cn = torch.div(top_values_cn, top_values_cn.sum(dim=1, keepdim=True))
                 
+<<<<<<< Updated upstream
                 print(f"Created clean probability distributions over top {topk} words")
                 print(f"English topic_probas shape: {topic_probas_en.shape}")
                 print(f"Chinese topic_probas shape: {topic_probas_cn.shape}")
+=======
+                # Store vocabulary indices for loss computation
+                self.topic_indices_en = top_indices_en
+                self.topic_indices_cn = top_indices_cn
+                
+                print(f"Extracted top {topk} word indices for each topic (for refinement and validation)")
+                print(f"English topic indices shape: {top_indices_en.shape}")
+                print(f"Chinese topic indices shape: {top_indices_cn.shape}")
+>>>>>>> Stashed changes
                 
                 # Cross-lingual topic refinement using Gemini API
                 refined_topics, high_confidence_topics = None, None
                 if hasattr(self.args, 'gemini_api_key') and self.args.gemini_api_key:
+<<<<<<< Updated upstream
                     print("Starting cross-lingual topic refinement...")
                     
                     refined_topics, high_confidence_topics = refine_cross_lingual_topics(
@@ -98,6 +114,50 @@ class Runner:
                 else:
                     print("No Gemini API key provided, skipping cross-lingual refinement")
                 #TO-do: add loss ot 
+=======
+                    try:
+                        print("Starting cross-lingual topic refinement...")
+                        
+                        # Compute probabilities for refinement (detached for API call)
+                        topic_probas_en_for_refinement = torch.div(top_values_en, top_values_en.sum(dim=1, keepdim=True)).detach()
+                        topic_probas_cn_for_refinement = torch.div(top_values_cn, top_values_cn.sum(dim=1, keepdim=True)).detach()
+
+                        refined_topics, high_confidence_topics = refine_cross_lingual_topics(
+                            topic_words_en=topic_words_en,
+                            topic_words_cn=topic_words_cn,
+                            topic_probas_en=topic_probas_en_for_refinement,
+                            topic_probas_cn=topic_probas_cn_for_refinement,
+                            vocab_en=self.model.vocab_en,
+                            vocab_cn=self.model.vocab_cn,
+                            api_key=self.args.gemini_api_key,
+                            R=getattr(self.args, 'refinement_rounds', 3)
+                        )
+
+                        if refined_topics is not None and high_confidence_topics is not None:
+                            print(f"✓ Successfully refined {len(refined_topics)} topics using cross-lingual refinement")
+
+                            # Print summary of refined topics
+                            for i, (refined, high_conf) in enumerate(zip(refined_topics, high_confidence_topics)):
+                                total_words = len(high_conf['high_confidence_words_en']) + len(high_conf['high_confidence_words_cn'])
+                                print(f"Topic {i}: {total_words} high-confidence words ({len(high_conf['high_confidence_words_en'])} EN, {len(high_conf['high_confidence_words_cn'])} CN)")
+                                sample_words = high_conf['high_confidence_words_en'][:3] + high_conf['high_confidence_words_cn'][:3]
+                                print(f"  Sample words: {', '.join(sample_words[:5])}...")
+                        else:
+                            print("⚠ Cross-lingual refinement returned None results")
+                            
+                    except Exception as e:
+                        print(f"✗ Cross-lingual refinement failed: {e}")
+                        print("Continuing training without refinement loss...")
+                        refined_topics, high_confidence_topics = None, None
+
+                else:
+                    print("No Gemini API key provided, skipping cross-lingual refinement")
+
+                # Store refined topics for evaluation
+                self.refined_topics = refined_topics
+                self.high_confidence_topics = high_confidence_topics
+                # TODO: Could add additional metrics or logging for refined topics 
+>>>>>>> Stashed changes
 
             sum_loss = 0.
 
@@ -202,8 +262,23 @@ class Runner:
         theta_cn = self.get_theta(dataset.bow_cn, lang='cn')
         return theta_en, theta_cn
 
+<<<<<<< Updated upstream
     def get_topic_words(self, beta_en, beta_cn, topk=15):
         """Extract top words for each topic from beta matrices"""
+=======
+    def get_topic_words(self, beta_en, beta_cn, topk_refine=15, topk_loss=15):
+        """Extract top words for each topic from beta matrices
+
+        Args:
+            beta_en: English beta matrix
+            beta_cn: Chinese beta matrix
+            topk_refine: Number of words for refinement vocabulary (default: 15)
+            topk_loss: Number of words for loss computation (default: 15)
+
+        Returns:
+            topic_words_en, topic_words_cn: Lists of topic word strings with exactly topk_refine words each
+        """
+>>>>>>> Stashed changes
         # Convert CUDA tensors to numpy arrays if necessary
         if torch.is_tensor(beta_en):
             beta_en = beta_en.detach().cpu().numpy()
