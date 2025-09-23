@@ -51,7 +51,7 @@ class Runner:
             if epoch >= self.args.warmStep:
                 # Extract topic words from current beta
                 beta_en, beta_cn = self.model.get_beta()
-                topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn, topk_refine=50)
+                topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn, topk_refine=15)
                 print(f"Phase 2 - Epoch {epoch}: Extracted topic words")
                 print(f"English topic words: {len(topic_words_en)} topics")
                 print(f"Chinese topic words: {len(topic_words_cn)} topics")
@@ -73,39 +73,51 @@ class Runner:
                 print(f"English topic indices shape: {top_indices_en.shape}")
                 print(f"Chinese topic indices shape: {top_indices_cn.shape}")
                 
-                # Cross-lingual topic refinement using Gemini API
-                refined_topics, high_confidence_topics = None, None
-                if hasattr(self.args, 'gemini_api_key') and self.args.gemini_api_key:
-                    print("Starting cross-lingual topic refinement...")
-                    
-                    # Compute probabilities for refinement (detached for API call)
-                    topic_probas_en_for_refinement = torch.div(top_values_en, top_values_en.sum(dim=1, keepdim=True)).detach()
-                    topic_probas_cn_for_refinement = torch.div(top_values_cn, top_values_cn.sum(dim=1, keepdim=True)).detach()
+                # Cross-lingual topic refinement using Gemini API (run ONCE at warmStep)
+                if epoch == self.args.warmStep:
+                    refined_topics, high_confidence_topics = None, None
+                    if hasattr(self.args, 'gemini_api_key') and self.args.gemini_api_key and not getattr(self, '_refinement_done', False):
+                        print("Starting cross-lingual topic refinement...")
+                        
+                        # Compute probabilities for refinement (detached for API call)
+                        topic_probas_en_for_refinement = torch.div(top_values_en, top_values_en.sum(dim=1, keepdim=True)).detach()
+                        topic_probas_cn_for_refinement = torch.div(top_values_cn, top_values_cn.sum(dim=1, keepdim=True)).detach()
 
-                    refined_topics, high_confidence_topics = refine_cross_lingual_topics(
-                        topic_words_en=topic_words_en,
-                        topic_words_cn=topic_words_cn,
-                        topic_probas_en=topic_probas_en_for_refinement,
-                        topic_probas_cn=topic_probas_cn_for_refinement,
-                        api_key=self.args.gemini_api_key,
-                        R=getattr(self.args, 'refinement_rounds', 3)
-                    )
+                        refined_topics, high_confidence_topics = refine_cross_lingual_topics(
+                            topic_words_en=topic_words_en,
+                            topic_words_cn=topic_words_cn,
+                            topic_probas_en=topic_probas_en_for_refinement,
+                            topic_probas_cn=topic_probas_cn_for_refinement,
+                            vocab_en=self.model.vocab_en,
+                            vocab_cn=self.model.vocab_cn,
+                            api_key=self.args.gemini_api_key,
+                            R=getattr(self.args, 'refinement_rounds', 3)
+                        )
 
-                    print(f"Refined {len(refined_topics)} topics using cross-lingual refinement")
+                        print(f"Refined {len(refined_topics)} topics using cross-lingual refinement")
+                        
+                        # Print summary of refined topics
+                        for i, (refined, high_conf) in enumerate(zip(refined_topics, high_confidence_topics)):
+                            total_words = len(high_conf['high_confidence_words_en']) + len(high_conf['high_confidence_words_cn'])
+                            print(f"Topic {i}: {total_words} high-confidence words ({len(high_conf['high_confidence_words_en'])} EN, {len(high_conf['high_confidence_words_cn'])} CN)")
+                            sample_words = high_conf['high_confidence_words_en'][:3] + high_conf['high_confidence_words_cn'][:3]
+                            print(f"  Sample words: {', '.join(sample_words[:5])}...")
 
-                    # Print summary of refined topics
-                    for i, (refined, high_conf) in enumerate(zip(refined_topics, high_confidence_topics)):
-                        total_words = len(high_conf['high_confidence_words_en']) + len(high_conf['high_confidence_words_cn'])
-                        print(f"Topic {i}: {total_words} high-confidence words ({len(high_conf['high_confidence_words_en'])} EN, {len(high_conf['high_confidence_words_cn'])} CN)")
-                        sample_words = high_conf['high_confidence_words_en'][:3] + high_conf['high_confidence_words_cn'][:3]
-                        print(f"  Sample words: {', '.join(sample_words[:5])}...")
+                        # Mark refinement done
+                        self._refinement_done = True
+                        
+                        # Store refined topics for evaluation
+                        self.refined_topics = refined_topics
+                        self.high_confidence_topics = high_confidence_topics
+                    else:
+                        if not hasattr(self.args, 'gemini_api_key') or not self.args.gemini_api_key:
+                            print("No Gemini API key provided, skipping cross-lingual refinement")
+                        else:
+                            print("Skipping refinement (already performed)")
 
-                else:
-                    print("No Gemini API key provided, skipping cross-lingual refinement")
-
-                # Store refined topics for evaluation
-                self.refined_topics = refined_topics
-                self.high_confidence_topics = high_confidence_topics
+                # Ensure refined topics persist after warmStep for loss computation
+                refined_topics = getattr(self, 'refined_topics', None)
+                high_confidence_topics = getattr(self, 'high_confidence_topics', None)
                 #TO-do: add loss ot 
 
             sum_loss = 0.
@@ -163,7 +175,9 @@ class Runner:
                         high_confidence_topics=high_confidence_topics,
                         vocab_en=self.model.vocab_en,
                         vocab_cn=self.model.vocab_cn,
-                        model=self.model
+                        word_embeddings_en=self.model.word_embeddings_en,
+                        word_embeddings_cn=self.model.word_embeddings_cn,
+                        refine_weight=self.args.refine_weight
                     )
                     
                     # Always apply refinement loss with non-zero weight
@@ -228,13 +242,13 @@ class Runner:
         theta_cn = self.get_theta(dataset.bow_cn, lang='cn')
         return theta_en, theta_cn
 
-    def get_topic_words(self, beta_en, beta_cn, topk_refine=50, topk_loss=15):
+    def get_topic_words(self, beta_en, beta_cn, topk_refine=15, topk_loss=15):
         """Extract top words for each topic from beta matrices
 
         Args:
             beta_en: English beta matrix
             beta_cn: Chinese beta matrix
-            topk_refine: Number of words for refinement vocabulary (default: 50)
+            topk_refine: Number of words for refinement vocabulary (default: 15)
             topk_loss: Number of words for loss computation (default: 15)
 
         Returns:
