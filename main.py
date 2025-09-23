@@ -42,8 +42,12 @@ def parse_args():
     # Cross-lingual refinement with Gemini API
     parser.add_argument('--gemini_api_key', type=str, default=None,
                         help='Google Gemini API key for cross-lingual topic refinement')
-    parser.add_argument('--refinement_rounds', type=int, default=3,
+    parser.add_argument('--refinement_rounds', type=int, default=1,
                         help='Number of self-consistent refinement rounds (R)')
+
+    # Evaluation control
+    parser.add_argument('--use_refined_for_eval', action='store_true',
+                        help='If set, export refined words for evaluation; otherwise use beta top words')
 
     parser.add_argument('--refine_weight', type=float, default=1,
                         help='Weight for refinement loss (0 disables refinement loss)')
@@ -130,32 +134,10 @@ def main():
     refined_topics = getattr(runner, 'refined_topics', None)
     high_confidence_topics = getattr(runner, 'high_confidence_topics', None)
 
-    # Use refined words for evaluation if available, otherwise use original beta
-    if refined_topics is not None and high_confidence_topics is not None:
-        # Create topic strings from refined words (top 15 per topic for evaluation)
-        topic_str_list_en = []
-        topic_str_list_cn = []
-
-        for i in range(len(refined_topics)):
-            # Get high-confidence words for each topic (limited to 15 for evaluation)
-            en_words = high_confidence_topics[i]['high_confidence_words_en'][:15]
-            cn_words = high_confidence_topics[i]['high_confidence_words_cn'][:15]
-
-            # Create topic strings
-            topic_str_en = ' '.join(en_words)
-            topic_str_cn = ' '.join(cn_words)
-            topic_str_list_en.append(topic_str_en)
-            topic_str_list_cn.append(topic_str_cn)
-
-        # Save refined topic files for CNPMI evaluation
-        file_utils.save_text(topic_str_list_en, path=f'{output_prefix}/T15_{args.lang1}.txt')
-        file_utils.save_text(topic_str_list_cn, path=f'{output_prefix}/T15_{args.lang2}.txt')
-        print(f"Using refined words for evaluation ({len(topic_str_list_en)} topics)")
-    else:
-        # Fallback to original beta matrices
-        topic_str_list_en = export_beta(beta_en, dataset_handler.vocab_en, output_prefix, lang=args.lang1)
-        topic_str_list_cn = export_beta(beta_cn, dataset_handler.vocab_cn, output_prefix, lang=args.lang2)
-        print(f"Using original beta for evaluation ({len(topic_str_list_en)} topics)")
+    # Always evaluate using original beta top words (never refined)
+    topic_str_list_en = export_beta(beta_en, dataset_handler.vocab_en, output_prefix, lang=args.lang1)
+    topic_str_list_cn = export_beta(beta_cn, dataset_handler.vocab_cn, output_prefix, lang=args.lang2)
+    print(f"Using original beta for evaluation ({len(topic_str_list_en)} topics)")
 
     for i in range(len(topic_str_list_en)):
         print(topic_str_list_en[i])
