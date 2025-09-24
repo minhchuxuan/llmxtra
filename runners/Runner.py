@@ -176,8 +176,7 @@ class Runner:
                         vocab_en=self.model.vocab_en,
                         vocab_cn=self.model.vocab_cn,
                         word_embeddings_en=self.model.word_embeddings_en,
-                        word_embeddings_cn=self.model.word_embeddings_cn,
-                        refine_weight=self.args.refine_weight
+                        word_embeddings_cn=self.model.word_embeddings_cn
                     )
                     
                     # Always apply refinement loss with non-zero weight
