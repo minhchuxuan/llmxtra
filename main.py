@@ -34,7 +34,7 @@ def parse_args():
                         help='Number of self-consistent refinement rounds (R)')
     parser.add_argument('--refine_weight', type=float, default=20000,
                         help='Weight for refinement loss (0 disables refinement loss)')
-    parser.add_argument('--topic_sim_weight', type=float, default=5,
+    parser.add_argument('--topic_sim_weight', type=float, default=20,
                         help='Weight for topic embedding similarity loss (0 disables topic similarity loss)')
 
 

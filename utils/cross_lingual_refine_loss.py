@@ -14,6 +14,7 @@ def get_word_embedding(word, vocab_en, vocab_cn, word_embeddings_en, word_embedd
     else:
         # This shouldn't happen after validation, but just in case
         raise ValueError(f"Word '{word}' not found in vocabularies")
+
     # Ensure we always return a torch.Tensor on CPU with float dtype
     if isinstance(vec, np.ndarray):
         vec = torch.from_numpy(vec)
@@ -102,7 +103,8 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
                                       topic_indices_en, topic_indices_cn,
                                       refined_topics, high_confidence_topics,
                                       vocab_en, vocab_cn,
-                                      word_embeddings_en, word_embeddings_cn):
+                                      word_embeddings_en, word_embeddings_cn,
+                                      sinkhorn_reg: float = 0.1):
     """
     Compute MMD² loss between original and refined topic distributions
     
@@ -116,6 +118,7 @@ def compute_cross_lingual_refine_loss(topic_probas_en, topic_probas_cn,
         vocab_cn: Chinese vocabulary list
         word_embeddings_en: English word embeddings tensor
         word_embeddings_cn: Chinese word embeddings tensor
+        sinkhorn_reg: Deprecated parameter (kept for compatibility)
     
     Returns:
         MMD² distance between original and refined distributions
