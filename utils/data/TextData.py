@@ -4,20 +4,15 @@ import scipy
 import torch
 from collections import defaultdict
 from torch.utils.data import Dataset, DataLoader
+from . import file_utils
 
-from utils.data import file_utils
 
-
-class BilingualTextDataset(Dataset):    
-    def __init__(self, bow_en, bow_cn, doc_embeddings_en=None, doc_embeddings_cn=None,
-                 clusterinfo_en=None, clusterinfo_cn=None):
-
+class _BilingualDataset(Dataset):
+    def __init__(self, bow_en, bow_cn, doc_embeddings_en=None, doc_embeddings_cn=None):
         self.bow_en = bow_en
         self.bow_cn = bow_cn
         self.doc_embeddings_en = doc_embeddings_en
         self.doc_embeddings_cn = doc_embeddings_cn
-        self.clusterinfo_en = clusterinfo_en
-        self.clusterinfo_cn = clusterinfo_cn
         self.bow_size_en = len(self.bow_en)
         self.bow_size_cn = len(self.bow_cn)
 
@@ -30,179 +25,157 @@ class BilingualTextDataset(Dataset):
         
         return_dict = {
             'bow_en': self.bow_en[en_idx],
-            'bow_cn': self.bow_cn[cn_idx],
-            'doc_embedding_en': self.doc_embeddings_en[en_idx] if self.doc_embeddings_en is not None else None,
-            'doc_embedding_cn': self.doc_embeddings_cn[cn_idx] if self.doc_embeddings_cn is not None else None,
-            'cluster_en': self.clusterinfo_en[en_idx] if self.clusterinfo_en is not None else None,
-            'cluster_cn': self.clusterinfo_cn[cn_idx] if self.clusterinfo_cn is not None else None,
+            'bow_cn': self.bow_cn[cn_idx]
         }
-
+        
+        # Add document embeddings if available
+        if self.doc_embeddings_en is not None:
+            return_dict['doc_embedding_en'] = self.doc_embeddings_en[en_idx]
+        if self.doc_embeddings_cn is not None:
+            return_dict['doc_embedding_cn'] = self.doc_embeddings_cn[cn_idx]
+            
         return return_dict
 
 
-class DatasetHandler:
-    
-    def __init__(self, dataset, batch_size, lang1, lang2, n_topics=50, device=0):
-
-        data_dir = f'./data/{dataset}'
-        # Use default dictionary path if not provided
-        self.device = device
+class CrosslingualDataset:
+    def __init__(self, dataset_dir, lang1, lang2, dict_path, device='cpu', batch_size=200, as_tensor=True):
         self.batch_size = batch_size
 
-        # Load data for both languages
-        self.train_texts_en, self.test_texts_en, self.train_bow_matrix_en, self.test_bow_matrix_en, \
-        self.vocab_en = self.read_data(data_dir, lang=lang1)
-        
-        self.train_texts_cn, self.test_texts_cn, self.train_bow_matrix_cn, self.test_bow_matrix_cn, \
-        self.vocab_cn = self.read_data(data_dir, lang=lang2)
+        self.train_texts_en, self.test_texts_en, self.train_bow_en, self.test_bow_en, self.train_labels_en, self.test_labels_en, self.vocab_en, self.word2id_en, self.id2word_en = self.read_data(dataset_dir, lang=lang1)
+        self.train_texts_cn, self.test_texts_cn, self.train_bow_cn, self.test_bow_cn, self.train_labels_cn, self.test_labels_cn, self.vocab_cn, self.word2id_cn, self.id2word_cn = self.read_data(dataset_dir, lang=lang2)
 
-        # Set dimensions
         self.train_size_en = len(self.train_texts_en)
         self.train_size_cn = len(self.train_texts_cn)
         self.vocab_size_en = len(self.vocab_en)
         self.vocab_size_cn = len(self.vocab_cn)
 
-        self.doc_embeddings_en =np.load(os.path.join(data_dir, f'doc_embeddings_{lang1}_train.npy'))
-        self.doc_embeddings_cn =np.load(os.path.join(data_dir, f'doc_embeddings_{lang2}_train.npy'))
-        # Load cluster information
-        self.clusterinfo_en = np.load(os.path.join(data_dir, f'cluster_labels_{lang1}_cosine.npy'))
-        self.clusterinfo_cn = np.load(os.path.join(data_dir, f'cluster_labels_{lang2}_cosine.npy'))
+        self.trans_dict, self.trans_matrix_en, self.trans_matrix_cn = self.parse_dictionary(dict_path)
 
+        # Load document embeddings
+        self.doc_embeddings_en = np.load(os.path.join(dataset_dir, f'doc_embeddings_{lang1}_train.npy'))
+        self.doc_embeddings_cn = np.load(os.path.join(dataset_dir, f'doc_embeddings_{lang2}_train.npy'))
+        
         # Load word embeddings
-        try:
-            self.word_embeddings_en = np.load(os.path.join(data_dir, f'word_embeddings_{lang1}.npy'))
-            self.word_embeddings_cn = np.load(os.path.join(data_dir, f'word_embeddings_{lang2}.npy'))
-            print(f"Loaded word embeddings: EN {self.word_embeddings_en.shape}, CN {self.word_embeddings_cn.shape}")
-        except FileNotFoundError:
-            print(f"Warning: Word embeddings not found in {data_dir}")
-            self.word_embeddings_en = None
-            self.word_embeddings_cn = None
-        
-        # Load translation dictionary
+        self.word_embeddings_en = np.load(os.path.join(dataset_dir, f'word_embeddings_{lang1}.npy'))
+        self.word_embeddings_cn = np.load(os.path.join(dataset_dir, f'word_embeddings_{lang2}.npy'))
 
+        self.pretrained_WE_en = scipy.sparse.load_npz(os.path.join(dataset_dir, f'word2vec_{lang1}.npz')).toarray()
+        self.pretrained_WE_cn = scipy.sparse.load_npz(os.path.join(dataset_dir, f'word2vec_{lang2}.npz')).toarray()
 
-        
-        
-        self.beta_en = self.calculate_beta(
-            self.train_bow_matrix_en, self.clusterinfo_en, self.vocab_size_en, num_topics=n_topics
-        )
-        self.beta_cn = self.calculate_beta(
-            self.train_bow_matrix_cn, self.clusterinfo_cn, self.vocab_size_cn, num_topics=n_topics
-        )
+        self.Map_en2cn = self.get_Map(self.trans_matrix_en, self.train_bow_en)
+        self.Map_cn2en = self.get_Map(self.trans_matrix_cn, self.train_bow_cn)
 
-        self.mu_prior, self.var_prior = self.calculate_cluster_based_prior(num_topics=n_topics)
-        # Move data to CUDA if available
-
-
-        self.doc_embeddings_en, self.doc_embeddings_cn = self.move_to_cuda(self.doc_embeddings_en, self.doc_embeddings_cn)
-        self.clusterinfo_en, self.clusterinfo_cn = self.move_to_cuda(self.clusterinfo_en, self.clusterinfo_cn)       
-        self.train_bow_matrix_en, self.test_bow_matrix_en = self.move_to_cuda(
-            self.train_bow_matrix_en, self.test_bow_matrix_en)
-        self.train_bow_matrix_cn, self.test_bow_matrix_cn = self.move_to_cuda(
-            self.train_bow_matrix_cn, self.test_bow_matrix_cn)
-
-        # Create data loaders
-        # Cập nhật train_loader và test_loader
-        self.train_loader = DataLoader(
-            BilingualTextDataset(
-                self.train_bow_matrix_en, self.train_bow_matrix_cn,
-                self.doc_embeddings_en, self.doc_embeddings_cn,
-                self.clusterinfo_en, self.clusterinfo_cn
-            ), 
-            batch_size=batch_size, 
-            shuffle=True
-        )
-        
-        self.test_loader = DataLoader(
-            BilingualTextDataset(
-                self.test_bow_matrix_en, self.test_bow_matrix_cn,
-            ),
-            batch_size=batch_size, 
-            shuffle=False
-        )
-        
-    def move_to_cuda(self, *arrays):
-        results = []
-        for arr in arrays:
-            if isinstance(arr, np.ndarray):
-                tensor = torch.tensor(arr).float()
-            elif isinstance(arr, torch.Tensor):
-                tensor = arr.float()
-            else:
-                raise TypeError("Input must be a numpy array or torch tensor")
+        if as_tensor:
+            self.train_bow_en = self.move_to_device(self.train_bow_en, device)
+            self.test_bow_en = self.move_to_device(self.test_bow_en, device)
+            self.train_bow_cn = self.move_to_device(self.train_bow_cn, device)
+            self.test_bow_cn = self.move_to_device(self.test_bow_cn, device)
             
-            if torch.cuda.is_available():
-                device = torch.device(f"cuda:{self.device}")
-                tensor = tensor.to(device)
-            results.append(tensor)
+            # Move document embeddings to device
+            self.doc_embeddings_en = self.move_to_device(self.doc_embeddings_en, device)
+            self.doc_embeddings_cn = self.move_to_device(self.doc_embeddings_cn, device)
+
+            self.train_dataloader = DataLoader(
+                _BilingualDataset(
+                    self.train_bow_en, 
+                    self.train_bow_cn,
+                    self.doc_embeddings_en,
+                    self.doc_embeddings_cn
+                ), 
+                batch_size=batch_size, 
+                shuffle=True
+            )
+            self.test_dataloader = DataLoader(
+                _BilingualDataset(
+                    self.test_bow_en, 
+                    self.test_bow_cn
+                ), 
+                batch_size=batch_size, 
+                shuffle=False
+            )
+
+    def move_to_device(self, bow, device):
+        return torch.as_tensor(bow, device=device).float()
+
+    def read_data(self, dataset_dir, lang):
+        train_texts = file_utils.read_text(os.path.join(dataset_dir, 'train_texts_{}.txt'.format(lang)))
+        test_texts = file_utils.read_text(os.path.join(dataset_dir, 'test_texts_{}.txt'.format(lang)))
+        vocab = file_utils.read_text(os.path.join(dataset_dir, 'vocab_{}'.format(lang)))
+        word2id = dict(zip(vocab, range(len(vocab))))
+        id2word = dict(zip(range(len(vocab)), vocab))
+
+        train_bow = scipy.sparse.load_npz(os.path.join(dataset_dir, 'train_bow_matrix_{}.npz'.format(lang))).toarray()
+        test_bow = scipy.sparse.load_npz(os.path.join(dataset_dir, 'test_bow_matrix_{}.npz'.format(lang))).toarray()
+
+        train_labels = np.loadtxt(f'{dataset_dir}/train_labels_{lang}.txt').astype('int32')
+        test_labels = np.loadtxt(f'{dataset_dir}/test_labels_{lang}.txt').astype('int32')
+
+        return train_texts, test_texts, train_bow, test_bow, train_labels, test_labels, vocab, word2id, id2word
+
+    def parse_dictionary(self, dict_path):
+        trans_dict = defaultdict(set)
+
+        trans_matrix_en = np.zeros((self.vocab_size_en, self.vocab_size_cn), dtype='int32')
+        trans_matrix_cn = np.zeros((self.vocab_size_cn, self.vocab_size_en), dtype='int32')
+
+        dict_texts = file_utils.read_text(dict_path)
+
+        for line in dict_texts:
+            terms = (line.strip()).split()
+            if len(terms) == 2:
+                cn_term = terms[0]
+                en_term = terms[1]
+                if cn_term in self.word2id_cn and en_term in self.word2id_en:
+                    trans_dict[cn_term].add(en_term)
+                    trans_dict[en_term].add(cn_term)
+                    cn_term_id = self.word2id_cn[cn_term]
+                    en_term_id = self.word2id_en[en_term]
+
+                    trans_matrix_en[en_term_id][cn_term_id] = 1
+                    trans_matrix_cn[cn_term_id][en_term_id] = 1
+
+        return trans_dict, trans_matrix_en, trans_matrix_cn
+
+    def get_Map(self, trans_matrix, bow):
+        Map = (trans_matrix * bow.sum(0)[:, np.newaxis]).astype('float32')
+        Map = Map + 1
+        Map_sum = np.sum(Map, axis=1)
+        t_index = Map_sum > 0
+        Map[t_index, :] = Map[t_index, :] / Map_sum[t_index, np.newaxis]
+
+        return Map
+
+
+class DatasetHandler:
+    """
+    Wrapper around CrosslingualDataset to maintain compatibility with existing main.py code
+    """
+    def __init__(self, dataset_name, batch_size, lang1, lang2, num_topics, device=0):
+        # Construct dataset directory path
+        dataset_dir = f'data/{dataset_name}'
         
-        return results if len(results) > 1 else results[0]
-
-    def read_data(self, data_dir, lang):
-        train_texts = file_utils.read_texts(os.path.join(data_dir, f'train_texts_{lang}.txt'))
-        test_texts = file_utils.read_texts(os.path.join(data_dir, f'test_texts_{lang}.txt'))
-        vocab = file_utils.read_texts(os.path.join(data_dir, f'vocab_{lang}'))
-
-
-
-        train_bow_matrix = scipy.sparse.load_npz(
-            os.path.join(data_dir, f'train_bow_matrix_{lang}.npz')).toarray()
-        test_bow_matrix = scipy.sparse.load_npz(
-            os.path.join(data_dir, f'test_bow_matrix_{lang}.npz')).toarray()
-
-        return train_texts, test_texts, train_bow_matrix, test_bow_matrix, vocab
-
-
-    def calculate_beta(self, bow_np, cluster_np, vocab_size, num_topics, epsilon=1e-8):
-        beta = np.zeros((num_topics, vocab_size), dtype=np.float32)
-
-        for doc_idx, cluster_id in enumerate(cluster_np):
-            if cluster_id < num_topics:
-                beta[cluster_id] += bow_np[doc_idx]
-
-        row_sums = beta.sum(axis=1, keepdims=True)
-        beta = beta / np.maximum(row_sums, epsilon)
-
-        doc_freq = np.count_nonzero(beta > 0, axis=0)
-        idf = np.log((num_topics + 1) / (doc_freq + 1)) + 1
-
-        beta = beta * idf
-        row_sums = beta.sum(axis=1, keepdims=True)
-        beta = beta / np.maximum(row_sums, epsilon) + epsilon
-        return beta
-    
-    def calculate_cluster_based_prior(self, num_topics, smoothing_count=0, epsilon=1e-6):
-        labels_l1 = self.clusterinfo_en
-        labels_l2 = self.clusterinfo_cn
+        # Construct dictionary path based on languages
+        if lang2 == "ja":
+            dict_path = 'data/dict/MUSE/ja-en.txt'
+        else:
+            dict_path = 'data/dict/ch_en_dict.dat'
         
-        all_labels = np.concatenate((labels_l1, labels_l2))
+        # Create CrosslingualDataset instance
+        self.dataset = CrosslingualDataset(
+            dataset_dir=dataset_dir,
+            lang1=lang1,
+            lang2=lang2,
+            dict_path=dict_path,
+            device=f'cuda:{device}' if torch.cuda.is_available() else 'cpu',
+            batch_size=batch_size,
+            as_tensor=True
+        )
         
-        counts_array = np.zeros(num_topics, dtype=np.float32)
-        for label in all_labels:
-            if 0 <= label < num_topics: 
-                counts_array[int(label)] += 1
+        # Expose all attributes from the dataset for compatibility
+        for attr_name in dir(self.dataset):
+            if not attr_name.startswith('_'):
+                setattr(self, attr_name, getattr(self.dataset, attr_name))
         
-        # Tạo mảng đếm và làm mịn
-        smoothed_counts = counts_array + smoothing_count
-        total_docs = smoothed_counts.sum()
-            
-        # Tính toán tham số prior
-        avg_count = total_docs / num_topics
-        a_new = (smoothed_counts / (avg_count + epsilon)) + epsilon
-        a_new = np.maximum(a_new, epsilon)
-        a_new = a_new.reshape(1, -1)
-        
-        # Chuyển đổi sang tham số Logistic-Normal
-        log_a_new = np.log(a_new)
-        mu_prior = (log_a_new.T - np.mean(log_a_new, 1, keepdims=True)).T
-        
-        # Tính variance
-        term1 = (1.0 / a_new) * (1 - (2.0 / num_topics))
-        term2 = (1.0 / (num_topics * num_topics)) * np.sum(1.0 / a_new, 1, keepdims=True)
-        var_prior = term1 + term2
-        
-        # Làm gọn kết quả
-        mu_prior = mu_prior.squeeze()
-        var_prior = var_prior.squeeze()
-        return mu_prior.astype(np.float32), var_prior.astype(np.float32)
-
+        # Create train and test loaders with proper naming
+        self.train_loader = self.dataset.train_dataloader
+        self.test_loader = self.dataset.test_dataloader

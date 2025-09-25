@@ -175,7 +175,8 @@ Focus on the most coherent and representative single words from both languages f
     def self_consistent_refinement(self,
                                    topic_words_en: List[str],
                                    topic_words_cn: List[str],
-                                   R: int = 3) -> List[Dict]:
+                                   R: int = 3,
+                                   batch_size: int = 25) -> List[Dict]:
         """
         Self-Consistent Refinement: Ask Gemini R times to refine topics, count word occurrences
 
@@ -183,6 +184,7 @@ Focus on the most coherent and representative single words from both languages f
             topic_words_en: List of English topic word strings (each with 15 words)
             topic_words_cn: List of Chinese topic word strings (each with 15 words)
             R: Number of refinement rounds
+            batch_size: Number of topics to process in each batch (default 25)
 
         Returns:
             List of topics with word counts across refinement rounds
@@ -199,37 +201,62 @@ Focus on the most coherent and representative single words from both languages f
                 'refinement_rounds_completed': 0
             })
         
-        print(f"Starting refinement for {num_topics} topics with {R} rounds...")
+        print(f"Starting refinement for {num_topics} topics with {R} rounds using batch size {batch_size}...")
+        
+        # Calculate number of batches needed
+        num_batches = (num_topics + batch_size - 1) // batch_size
+        print(f"Processing {num_topics} topics in {num_batches} batches of size {batch_size}")
         
         # Perform R refinement rounds
         for r in range(R):
-            prompt = self.create_refinement_prompt(topic_words_en, topic_words_cn)
-            result = self.call_gemini_api(prompt, expected_num_topics=num_topics)
+            print(f"Round {r+1}/{R}:")
             
-            if not (result and isinstance(result, list)):
-                print(f"Round {r+1}: Failed to get valid API results")
-                continue
+            # Process topics in batches
+            for batch_idx in range(num_batches):
+                start_idx = batch_idx * batch_size
+                end_idx = min(start_idx + batch_size, num_topics)
                 
-            # Process refinement results
-            for topic_result in result:
-                if not self._is_valid_topic_result(topic_result, num_topics):
+                print(f"  Processing batch {batch_idx+1}/{num_batches} (topics {start_idx}-{end_idx-1})")
+                
+                # Extract batch data
+                batch_topic_words_en = topic_words_en[start_idx:end_idx]
+                batch_topic_words_cn = topic_words_cn[start_idx:end_idx]
+                batch_num_topics = len(batch_topic_words_en)
+                
+                # Create prompt for this batch
+                prompt = self.create_refinement_prompt(batch_topic_words_en, batch_topic_words_cn)
+                result = self.call_gemini_api(prompt, expected_num_topics=batch_num_topics)
+                
+                if not (result and isinstance(result, list)):
+                    print(f"    Batch {batch_idx+1}: Failed to get valid API results")
                     continue
                     
-                topic_id = topic_result['topic_id']
-                topic_data = refined_topics[topic_id]
-                
-                # Update word counts for both languages
-                self._update_word_counts(
-                    topic_data['word_counts_en'], 
-                    topic_result.get('refined_words_en', [])
-                )
-                self._update_word_counts(
-                    topic_data['word_counts_cn'], 
-                    topic_result.get('refined_words_cn', [])
-                )
-                
-                # Track completed rounds
-                topic_data['refinement_rounds_completed'] += 1
+                # Process refinement results for this batch
+                for topic_result in result:
+                    if not self._is_valid_topic_result(topic_result, batch_num_topics):
+                        continue
+                        
+                    # Adjust topic_id to global index
+                    batch_topic_id = topic_result['topic_id']
+                    global_topic_id = start_idx + batch_topic_id
+                    
+                    if global_topic_id >= num_topics:
+                        continue
+                        
+                    topic_data = refined_topics[global_topic_id]
+                    
+                    # Update word counts for both languages
+                    self._update_word_counts(
+                        topic_data['word_counts_en'], 
+                        topic_result.get('refined_words_en', [])
+                    )
+                    self._update_word_counts(
+                        topic_data['word_counts_cn'], 
+                        topic_result.get('refined_words_cn', [])
+                    )
+                    
+                    # Track completed rounds
+                    topic_data['refinement_rounds_completed'] += 1
         
         return refined_topics
     
@@ -370,12 +397,13 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
                                 vocab_en: List[str],
                                 vocab_cn: List[str],
                                 api_key: str,
-                                R: int = 3) -> Tuple[List[Dict], List[Dict]]:
+                                R: int = 3,
+                                batch_size: int = 25) -> Tuple[List[Dict], List[Dict]]:
     """
-    Main function to perform cross-lingual topic refinement for all topics at once
+    Main function to perform cross-lingual topic refinement with batch processing
 
     Mathematical Framework:
-    1. Process all topics simultaneously in each refinement round
+    1. Process topics in batches for efficient API usage and memory management
     2. Self-consistent refinement: Refine top 15 words by removing irrelevant and adding relevant words, repeat R times
     3. Vocabulary validation: Discard refined words not in actual vocabulary files
     4. Frequency-based confidence: Aggregate across rounds for each topic
@@ -388,17 +416,18 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
         vocab_en: English vocabulary list from TextData
         vocab_cn: Chinese vocabulary list from TextData
         api_key: Gemini API key
-        R: Number of refinement rounds to
+        R: Number of refinement rounds
+        batch_size: Number of topics to process in each batch (default 25)
 
     Returns:
         Tuple of (refined_topics, high_confidence_topics)
     """
     refiner = CrossLingualTopicRefiner(api_key)
     
-    print(f"Starting batch refinement for {len(topic_words_en)} topics with {R} rounds each...")
+    print(f"Starting batch refinement for {len(topic_words_en)} topics with {R} rounds each using batch size {batch_size}...")
     
-    # Process all topics together in each refinement round
-    refined_topics = refiner.self_consistent_refinement(topic_words_en, topic_words_cn, R=R)
+    # Process topics in batches for each refinement round
+    refined_topics = refiner.self_consistent_refinement(topic_words_en, topic_words_cn, R=R, batch_size=batch_size)
     
     # Validate refined words against actual vocabulary
     print("Validating refined words against vocabulary...")

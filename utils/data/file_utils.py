@@ -33,7 +33,7 @@ def update_args(args, path):
     return args
 
 
-def read_texts(path):
+def read_text(path):
     texts = list()
     with open(path, 'r', encoding='utf-8') as file:
         for line in file:

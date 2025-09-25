@@ -2,19 +2,59 @@ import numpy as np
 import torch
 from torch.optim.lr_scheduler import StepLR
 from collections import defaultdict
-from models.XTRA import XTRA
-from utils.cross_lingual_refinement import refine_cross_lingual_topics
+from models.InfoCTM import InfoCTM
+from models.NMTM import NMTM
+from utils.cross_lingual_refinement import refine_cross_lingual_topics, CrossLingualTopicRefiner
 from utils.cross_lingual_refine_loss import compute_cross_lingual_refine_loss
+from utils.topic_embedding_loss import create_topic_embeddings, compute_topic_similarity_loss
 
 
 class Runner:
     def __init__(self, args):
         self.args = args
-        self.model = XTRA(args)
+        self.model = self._create_model(args)
 
         if torch.cuda.is_available():
             self.device = torch.device(f"cuda:{args.device}" if args.device is not None else "cuda:0")
             self.model = self.model.to(self.device)
+
+    def _create_model(self, args):
+        """Create model instance based on args.model"""
+        if args.model == 'InfoCTM':
+            model = InfoCTM(
+                trans_e2c=args.trans_matrix_en,
+                pretrain_word_embeddings_en=args.pretrained_WE_en,
+                pretrain_word_embeddings_cn=args.pretrained_WE_cn,
+                vocab_size_en=args.vocab_size_en,
+                vocab_size_cn=args.vocab_size_cn,
+                num_topics=args.num_topic,
+                en_units=args.en1_units,
+                dropout=args.dropout,
+                temperature=args.temperature,
+                pos_threshold=args.pos_threshold,
+                weight_MI=args.weight_MI  # From dataset config
+            )
+        elif args.model == 'NMTM':
+            model = NMTM(
+                Map_en2cn=args.Map_en2cn,
+                Map_cn2en=args.Map_cn2en,
+                vocab_size_en=args.vocab_size_en,
+                vocab_size_cn=args.vocab_size_cn,
+                num_topics=args.num_topic,
+                en_units=args.ens_unit,
+                dropout=args.dropout,
+                lam=args.lam
+            )
+        else:
+            raise ValueError(f"Unsupported model: {args.model}. Supported models: InfoCTM, NMTM")
+        
+        # Add required attributes to the model for compatibility with existing Runner code
+        model.vocab_en = args.vocab_en
+        model.vocab_cn = args.vocab_cn
+        model.word_embeddings_en = args.word_embeddings_en
+        model.word_embeddings_cn = args.word_embeddings_cn
+        
+        return model
 
     def make_optimizer(self):
         args_dict = {
@@ -91,7 +131,7 @@ class Runner:
                             vocab_en=self.model.vocab_en,
                             vocab_cn=self.model.vocab_cn,
                             api_key=self.args.gemini_api_key,
-                            R=getattr(self.args, 'refinement_rounds', 3)
+                            R=getattr(self.args, 'refinement_rounds', 5)
                         )
 
                         print(f"Refined {len(refined_topics)} topics using cross-lingual refinement")
@@ -109,6 +149,15 @@ class Runner:
                         # Store refined topics for evaluation
                         self.refined_topics = refined_topics
                         self.high_confidence_topics = high_confidence_topics
+                        
+                        # Create topic embeddings from refined words using BGE-M3
+                        self.topic_embeddings = create_topic_embeddings(
+                            high_confidence_topics=high_confidence_topics,
+                            encoder_model=None,  # Will load BGE-M3 automatically
+                            model_name="BAAI/bge-m3"
+                        )
+                        print(f"Created topic embeddings with shape: {self.topic_embeddings.shape}")
+                        
                     else:
                         if not hasattr(self.args, 'gemini_api_key') or not self.args.gemini_api_key:
                             print("No Gemini API key provided, skipping cross-lingual refinement")
@@ -130,17 +179,16 @@ class Runner:
             for batch_data in data_loader:
                 batch_bow_en = batch_data['bow_en']
                 batch_bow_cn = batch_data['bow_cn']
-                cluster_info = {
-                'cluster_en': batch_data['cluster_en'],
-                'cluster_cn': batch_data['cluster_cn']
-                }
                 document_info = {
                 'doc_embedding_en': batch_data['doc_embedding_en'],
                 'doc_embedding_cn': batch_data['doc_embedding_cn']
                 }
-            
-                # Trong Runner.py, train method:
-                rst_dict = self.model(batch_bow_en, batch_bow_cn, document_info, cluster_info)
+                # Get theta from model for topic similarity loss
+                theta_en, _, _ = self.model.get_theta(batch_bow_en, lang='en')
+                theta_cn, _, _ = self.model.get_theta(batch_bow_cn, lang='cn')
+                
+                # Forward pass
+                rst_dict = self.model(batch_bow_en, batch_bow_cn)
                 batch_loss = rst_dict['loss']
                 
                 # Add refinement loss if we have refined topics
@@ -182,8 +230,28 @@ class Runner:
                     # Always apply refinement loss with non-zero weight
                     weighted_refine_loss = self.args.refine_weight * refine_loss
                     batch_loss = batch_loss + weighted_refine_loss
-                    rst_dict['refine_loss'] = refine_loss.detach()
                     rst_dict['weighted_refine_loss'] = weighted_refine_loss.detach()
+
+                # Add topic embedding similarity loss from Phase 2 onwards
+                if (epoch >= self.args.warmStep and 
+                    hasattr(self, 'topic_embeddings') and
+                    hasattr(self.args, 'topic_sim_weight') and
+                    self.args.topic_sim_weight > 0):
+                    
+                    # Compute topic similarity loss
+                    topic_sim_loss = compute_topic_similarity_loss(
+                        doc_embeddings_en=document_info['doc_embedding_en'],
+                        doc_embeddings_cn=document_info['doc_embedding_cn'],
+                        topic_embeddings=self.topic_embeddings,
+                        theta_en=theta_en,
+                        theta_cn=theta_cn,
+                        temperature=getattr(self.args, 'temperature', 0.1)
+                    )
+                    
+                    # Add weighted topic similarity loss
+                    weighted_topic_sim_loss = self.args.topic_sim_weight * topic_sim_loss
+                    batch_loss = batch_loss + weighted_topic_sim_loss
+                    rst_dict['weighted_topic_sim_loss'] = weighted_topic_sim_loss.detach()
 
                 for key in rst_dict:
                     if 'loss' in key:

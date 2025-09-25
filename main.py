@@ -21,36 +21,21 @@ def parse_args():
     parser.add_argument('--dataset')
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--num_topic', type=int, default=50)
-    parser.add_argument('--weight_cluster', type=float)
-    parser.add_argument('--weight_beta', type=float, default=1.0, help='Weight for InfoNCE loss')
-    parser.add_argument('--weight_InfoNCE', type=float, default=1.0, help='Weight for InfoNCE theta')
 
     parser.add_argument('--ref_corpus_config', type=str, default="CNPMI/configs/ref_corpus/en_zh.yaml")
     parser.add_argument('--metric', type=str, default='npmi')
 
     parser.add_argument('--device', type=int, default=0, help='CUDA device index to use')
-
-    # llm
     parser.add_argument('--warmStep', default=0, type=int)
-    parser.add_argument('--llm_itl', action='store_true')
     parser.add_argument('--llm_step', type=int, default=3)  # the number of epochs for llm refine
-    parser.add_argument('--instruction', type=str, default='refine_labelTokenProbs',
-                        choices=['refine_labelTokenProbs', 'refine_wordIntrusion'])
-    parser.add_argument('--inference_bs', type=int, default=5)
-    parser.add_argument('--max_new_tokens', type=int, default=300)
-    
-    # Cross-lingual refinement with Gemini API
     parser.add_argument('--gemini_api_key', type=str, default=None,
                         help='Google Gemini API key for cross-lingual topic refinement')
-    parser.add_argument('--refinement_rounds', type=int, default=1,
+    parser.add_argument('--refinement_rounds', type=int, default=5,
                         help='Number of self-consistent refinement rounds (R)')
-
-    # Evaluation control
-    parser.add_argument('--use_refined_for_eval', action='store_true',
-                        help='If set, export refined words for evaluation; otherwise use beta top words')
-
     parser.add_argument('--refine_weight', type=float, default=1,
                         help='Weight for refinement loss (0 disables refinement loss)')
+    parser.add_argument('--topic_sim_weight', type=float, default=5,
+                        help='Weight for topic embedding similarity loss (0 disables topic similarity loss)')
 
 
 
@@ -86,8 +71,17 @@ def main():
     
     prj = args.wandb_prj 
     current_time = miscellaneous.get_current_datetime()
-    output_prefix = os.path.join(RESULT_DIR + "/" + str(args.model) + "/" +str(args.dataset), 
-                    str(args.weight_cluster)+"_"+str(args.weight_beta), current_time)
+    # Create output path based on model type
+    if args.model == 'InfoCTM':
+        model_params = f"weightMI_{args.weight_MI}"
+    elif args.model == 'NMTM':
+        model_params = f"lam_{args.lam}"
+    else:
+        # Fallback for other models
+        model_params = "default"
+    
+    output_prefix = os.path.join(RESULT_DIR + "/" + str(args.model) + "/" + str(args.dataset), 
+                    model_params, current_time)
     miscellaneous.create_folder_if_not_exist(output_prefix)
     seed.seedEverything(args.seed)
     
@@ -103,18 +97,9 @@ def main():
     args.doc_embeddings_en=dataset_handler.doc_embeddings_en
     args.doc_embeddings_cn=dataset_handler.doc_embeddings_cn
 
-    args.cluster_en=dataset_handler.clusterinfo_en
-    args.cluster_cn=dataset_handler.clusterinfo_cn
+
     args.vocab_size_en = len(dataset_handler.vocab_en)
     args.vocab_size_cn = len(dataset_handler.vocab_cn)
-
-
-    args.beta_en=dataset_handler.beta_en
-    args.beta_cn=dataset_handler.beta_cn 
-
-    args.mu_prior=dataset_handler.mu_prior
-    args.var_prior = dataset_handler.var_prior
-
 
 
     args.vocab_en = dataset_handler.vocab_en
@@ -123,6 +108,14 @@ def main():
     # Pass word embeddings to args
     args.word_embeddings_en = dataset_handler.word_embeddings_en
     args.word_embeddings_cn = dataset_handler.word_embeddings_cn
+    
+    # Pass additional attributes needed for InfoCTM and NMTM
+    args.trans_matrix_en = dataset_handler.trans_matrix_en
+    args.trans_matrix_cn = dataset_handler.trans_matrix_cn
+    args.pretrained_WE_en = dataset_handler.pretrained_WE_en
+    args.pretrained_WE_cn = dataset_handler.pretrained_WE_cn
+    args.Map_en2cn = dataset_handler.Map_en2cn
+    args.Map_cn2en = dataset_handler.Map_cn2en
     
 
     runner = Runner(args)
