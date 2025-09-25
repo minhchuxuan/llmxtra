@@ -40,7 +40,7 @@ def parse_args():
 
 
     # Add missing arguments used in the code
-    parser.add_argument('--wandb_prj', type=str, default='Camera-ready', help='Wandb project name')
+    parser.add_argument('--wandb_prj', type=str, default='ARR-October', help='Wandb project name')
 
     args = parser.parse_args()
     
