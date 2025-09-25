@@ -167,7 +167,6 @@ class Runner:
                 # Ensure refined topics persist after warmStep for loss computation
                 refined_topics = getattr(self, 'refined_topics', None)
                 high_confidence_topics = getattr(self, 'high_confidence_topics', None)
-                #TO-do: add loss ot 
 
             sum_loss = 0.
 

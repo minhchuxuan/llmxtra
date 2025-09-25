@@ -14,7 +14,6 @@ def get_word_embedding(word, vocab_en, vocab_cn, word_embeddings_en, word_embedd
     else:
         # This shouldn't happen after validation, but just in case
         raise ValueError(f"Word '{word}' not found in vocabularies")
-
     # Ensure we always return a torch.Tensor on CPU with float dtype
     if isinstance(vec, np.ndarray):
         vec = torch.from_numpy(vec)

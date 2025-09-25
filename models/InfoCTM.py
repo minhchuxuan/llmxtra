@@ -74,7 +74,9 @@ class InfoCTM(nn.Module):
 
         rst_dict = {
             'loss': loss,
-            'loss_TAMI': loss_TAMI
+            'loss_TAMI': loss_TAMI,
+            'loss_en': loss_en,
+            'loss_cn': loss_cn
         }
 
         return rst_dict
