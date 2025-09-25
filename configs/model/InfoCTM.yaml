@@ -12,5 +12,3 @@ dropout: 0.
 pos_threshold: 0.4
 
 temperature: 0.2
-topic_sim_weight: 500
-refine_weight: 15000
