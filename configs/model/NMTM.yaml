@@ -10,5 +10,3 @@ lr_gamma: 0.5
 lr_scheduler: StepLR
 test_index: 0
 temperature: 0.2
-topic_sim_weight: 500
-refine_weight: 15000
