@@ -28,6 +28,8 @@ def parse_args():
     parser.add_argument('--device', type=int, default=0, help='CUDA device index to use')
     parser.add_argument('--warmStep', default=0, type=int)
     parser.add_argument('--llm_step', type=int, default=30)  # the number of epochs for llm refine
+    parser.add_argument('--ref_loops', type=int, default=1,
+                        help='Number of refinement loops; 1 = single refinement phase (default)')
     parser.add_argument('--gemini_api_key', type=str, default=None,
                         help='Google Gemini API key for cross-lingual topic refinement')
     parser.add_argument('--refinement_rounds', type=int, default=5,
@@ -122,6 +124,23 @@ def main():
 
     # Train with refinement if API key available
     beta_en, beta_cn = runner.train(dataset_handler.train_loader)
+
+    # Additional refinement loops (refine-only) if requested
+    if getattr(args, 'ref_loops', 1) and args.ref_loops > 1:
+        for loop_idx in range(1, int(args.ref_loops)):
+            print(f"\n=== Refinement loop {loop_idx + 1}/{args.ref_loops} ===")
+            # Try to switch to refine-only schedule: run only llm_step epochs
+            try:
+                # Update both local args and runner.args if available
+                args.warmStep = 0
+                args.epochs = args.llm_step
+                if hasattr(runner, 'args'):
+                    runner.args.warmStep = 0
+                    runner.args.epochs = runner.args.llm_step
+            except Exception as e:
+                print(f"Warning: could not adjust refinement schedule: {e}")
+            # Re-run training to perform another refinement phase
+            beta_en, beta_cn = runner.train(dataset_handler.train_loader)
 
     # Get refined topics if available
     refined_topics = getattr(runner, 'refined_topics', None)
