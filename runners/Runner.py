@@ -81,201 +81,208 @@ class Runner:
 
         # Add these parameters
         max_grad_norm = 1.0  # Adjust this value as needed
- 
+
         if 'lr_scheduler' in self.args:
             lr_scheduler = self.make_lr_scheduler(optimizer)
 
-        for epoch in range(1, self.args.epochs + 1):
-            # Phase 2: Check if we should extract topic words
-            print(self.args.warmStep)
-            if epoch >= self.args.warmStep:
-                # Extract topic words from current beta
-                beta_en, beta_cn = self.model.get_beta()
-                topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn, topk_refine=15)
-                print(f"Phase 2 - Epoch {epoch}: Extracted topic words")
-                print(f"English topic words: {len(topic_words_en)} topics")
-                print(f"Chinese topic words: {len(topic_words_cn)} topics")
-                
-                # Step 1: Extract top-k words using torch.topk for each topic
-                topk = 15  # Number of top words to keep
-                
-                # For English topics - store indices for later fresh computation
-                top_values_en, top_indices_en = torch.topk(beta_en, topk, dim=1)
-                
-                # For Chinese topics - store indices for later fresh computation  
-                top_values_cn, top_indices_cn = torch.topk(beta_cn, topk, dim=1)
-                
-                # Store vocabulary indices for loss computation
-                self.topic_indices_en = top_indices_en
-                self.topic_indices_cn = top_indices_cn
-                
-                print(f"Extracted top {topk} word indices for each topic")
-                print(f"English topic indices shape: {top_indices_en.shape}")
-                print(f"Chinese topic indices shape: {top_indices_cn.shape}")
-                
-                # Cross-lingual topic refinement using Gemini API (run ONCE at warmStep)
-                if epoch == self.args.warmStep:
-                    refined_topics, high_confidence_topics = None, None
-                    if hasattr(self.args, 'gemini_api_key') and self.args.gemini_api_key and not getattr(self, '_refinement_done', False):
-                        print("Starting cross-lingual topic refinement...")
-                        
-                        # Compute probabilities for refinement (detached for API call)
-                        topic_probas_en_for_refinement = torch.div(top_values_en, top_values_en.sum(dim=1, keepdim=True)).detach()
-                        topic_probas_cn_for_refinement = torch.div(top_values_cn, top_values_cn.sum(dim=1, keepdim=True)).detach()
+        # Multiple refinement cycles
+        total_epochs = 0
+        for cycle in range(self.args.ref_loops):
+            print(f"\n=== Starting refinement cycle {cycle + 1}/{self.args.ref_loops} ===")
 
-                        refined_topics, high_confidence_topics = refine_cross_lingual_topics(
-                            topic_words_en=topic_words_en,
-                            topic_words_cn=topic_words_cn,
-                            topic_probas_en=topic_probas_en_for_refinement,
-                            topic_probas_cn=topic_probas_cn_for_refinement,
-                            vocab_en=self.model.vocab_en,
-                            vocab_cn=self.model.vocab_cn,
-                            api_key=self.args.gemini_api_key,
-                            R=getattr(self.args, 'refinement_rounds', 5)
-                        )
+            # Perform refinement at the start of each cycle (except if already done)
+            cycle_start_epoch = total_epochs + 1
+            if not getattr(self, '_refinement_done', False):
+                print(f"Performing refinement at start of cycle {cycle + 1}")
 
-                        print(f"Refined {len(refined_topics)} topics using cross-lingual refinement")
-                        
-                        # Print summary of refined topics
-                        for i, (refined, high_conf) in enumerate(zip(refined_topics, high_confidence_topics)):
-                            total_words = len(high_conf['high_confidence_words_en']) + len(high_conf['high_confidence_words_cn'])
-                            print(f"Topic {i}: {total_words} high-confidence words ({len(high_conf['high_confidence_words_en'])} EN, {len(high_conf['high_confidence_words_cn'])} CN)")
-                            sample_words = high_conf['high_confidence_words_en'][:3] + high_conf['high_confidence_words_cn'][:3]
-                            print(f"  Sample words: {', '.join(sample_words[:5])}...")
+            for epoch in range(cycle_start_epoch, cycle_start_epoch + self.args.llm_step):
+                total_epochs += 1
 
-                        # Mark refinement done
-                        self._refinement_done = True
-                        
-                        # Store refined topics for evaluation
-                        self.refined_topics = refined_topics
-                        self.high_confidence_topics = high_confidence_topics
-                        
-                        # Create topic embeddings from refined words using BGE-M3
-                        self.topic_embeddings = create_topic_embeddings(
-                            high_confidence_topics=high_confidence_topics,
-                            encoder_model=None,  # Will load BGE-M3 automatically
-                            model_name="BAAI/bge-m3"
-                        )
-                        print(f"Created topic embeddings with shape: {self.topic_embeddings.shape}")
-                        
-                    else:
-                        if not hasattr(self.args, 'gemini_api_key') or not self.args.gemini_api_key:
-                            print("No Gemini API key provided, skipping cross-lingual refinement")
+                # Check if we should extract topic words (only once per cycle)
+                if epoch == cycle_start_epoch and not getattr(self, '_refinement_done', False):
+                    # Extract topic words from current beta
+                    beta_en, beta_cn = self.model.get_beta()
+                    topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn, topk_refine=15)
+                    print(f"Phase 2 - Epoch {epoch}: Extracted topic words")
+                    print(f"English topic words: {len(topic_words_en)} topics")
+                    print(f"Chinese topic words: {len(topic_words_cn)} topics")
+
+                    # Step 1: Extract top-k words using torch.topk for each topic
+                    topk = 15  # Number of top words to keep
+
+                    # For English topics - store indices for later fresh computation
+                    top_values_en, top_indices_en = torch.topk(beta_en, topk, dim=1)
+
+                    # For Chinese topics - store indices for later fresh computation
+                    top_values_cn, top_indices_cn = torch.topk(beta_cn, topk, dim=1)
+
+                    # Store vocabulary indices for loss computation
+                    self.topic_indices_en = top_indices_en
+                    self.topic_indices_cn = top_indices_cn
+
+                    print(f"Extracted top {topk} word indices for each topic")
+                    print(f"English topic indices shape: {top_indices_en.shape}")
+                    print(f"Chinese topic indices shape: {top_indices_cn.shape}")
+
+                    # Cross-lingual topic refinement using Gemini API (run ONCE at start of first cycle)
+                    if cycle == 0:  # Only refine in the first cycle
+                        refined_topics, high_confidence_topics = None, None
+                        if hasattr(self.args, 'gemini_api_key') and self.args.gemini_api_key and not getattr(self, '_refinement_done', False):
+                            print("Starting cross-lingual topic refinement...")
+
+                            # Compute probabilities for refinement (detached for API call)
+                            topic_probas_en_for_refinement = torch.div(top_values_en, top_values_en.sum(dim=1, keepdim=True)).detach()
+                            topic_probas_cn_for_refinement = torch.div(top_values_cn, top_values_cn.sum(dim=1, keepdim=True)).detach()
+
+                            refined_topics, high_confidence_topics = refine_cross_lingual_topics(
+                                topic_words_en=topic_words_en,
+                                topic_words_cn=topic_words_cn,
+                                topic_probas_en=topic_probas_en_for_refinement,
+                                topic_probas_cn=topic_probas_cn_for_refinement,
+                                vocab_en=self.model.vocab_en,
+                                vocab_cn=self.model.vocab_cn,
+                                api_key=self.args.gemini_api_key,
+                                R=getattr(self.args, 'refinement_rounds', 5)
+                            )
+
+                            print(f"Refined {len(refined_topics)} topics using cross-lingual refinement")
+
+                            # Print summary of refined topics
+                            for i, (refined, high_conf) in enumerate(zip(refined_topics, high_confidence_topics)):
+                                total_words = len(high_conf['high_confidence_words_en']) + len(high_conf['high_confidence_words_cn'])
+                                print(f"Topic {i}: {total_words} high-confidence words ({len(high_conf['high_confidence_words_en'])} EN, {len(high_conf['high_confidence_words_cn'])} CN)")
+                                sample_words = high_conf['high_confidence_words_en'][:3] + high_conf['high_confidence_words_cn'][:3]
+                                print(f"  Sample words: {', '.join(sample_words[:5])}...")
+
+                            # Mark refinement done
+                            self._refinement_done = True
+
+                            # Store refined topics for evaluation
+                            self.refined_topics = refined_topics
+                            self.high_confidence_topics = high_confidence_topics
+
+                            # Create topic embeddings from refined words using BGE-M3
+                            self.topic_embeddings = create_topic_embeddings(
+                                high_confidence_topics=high_confidence_topics,
+                                encoder_model=None,  # Will load BGE-M3 automatically
+                                model_name="BAAI/bge-m3"
+                            )
+                            print(f"Created topic embeddings with shape: {self.topic_embeddings.shape}")
+
                         else:
-                            print("Skipping refinement (already performed)")
+                            if not hasattr(self.args, 'gemini_api_key') or not self.args.gemini_api_key:
+                                print("No Gemini API key provided, skipping cross-lingual refinement")
+                            else:
+                                print("Skipping refinement (already performed)")
 
                 # Ensure refined topics persist after warmStep for loss computation
                 refined_topics = getattr(self, 'refined_topics', None)
                 high_confidence_topics = getattr(self, 'high_confidence_topics', None)
 
-            sum_loss = 0.
+                sum_loss = 0.
 
-            loss_rst_dict = defaultdict(float)
-            print(epoch)
+                loss_rst_dict = defaultdict(float)
+                print(f"Cycle {cycle + 1}, Epoch {epoch}/{cycle_start_epoch + self.args.llm_step - 1}")
 
+                self.model.train()
+                for batch_data in data_loader:
+                    batch_bow_en = batch_data['bow_en']
+                    batch_bow_cn = batch_data['bow_cn']
+                    document_info = {
+                    'doc_embedding_en': batch_data['doc_embedding_en'],
+                    'doc_embedding_cn': batch_data['doc_embedding_cn']
+                    }
+                    # Get theta from model for topic similarity loss
+                    theta_en, _, _ = self.model.get_theta(batch_bow_en, lang='en')
+                    theta_cn, _, _ = self.model.get_theta(batch_bow_cn, lang='cn')
 
-            self.model.train()
-            for batch_data in data_loader:
-                batch_bow_en = batch_data['bow_en']
-                batch_bow_cn = batch_data['bow_cn']
-                document_info = {
-                'doc_embedding_en': batch_data['doc_embedding_en'],
-                'doc_embedding_cn': batch_data['doc_embedding_cn']
-                }
-                # Get theta from model for topic similarity loss
-                theta_en, _, _ = self.model.get_theta(batch_bow_en, lang='en')
-                theta_cn, _, _ = self.model.get_theta(batch_bow_cn, lang='cn')
-                
-                # Forward pass
-                rst_dict = self.model(batch_bow_en, batch_bow_cn)
-                batch_loss = rst_dict['loss']
-                
-                # Add refinement loss if we have refined topics
-                if (epoch >= self.args.warmStep and
-                    refined_topics is not None and
-                    high_confidence_topics is not None and
-                    hasattr(self.args, 'refine_weight') and
-                    self.args.refine_weight > 0):
+                    # Forward pass
+                    rst_dict = self.model(batch_bow_en, batch_bow_cn)
+                    batch_loss = rst_dict['loss']
 
-                    # Compute fresh probabilities from current beta for this batch
-                    dev = self.device
-                    current_beta_en, current_beta_cn = self.model.get_beta()
-                    
-                    # Extract probabilities for the same top-k indices identified during refinement
-                    current_topic_probas_en = torch.gather(current_beta_en, 1, self.topic_indices_en)
-                    current_topic_probas_cn = torch.gather(current_beta_cn, 1, self.topic_indices_cn)
-                    
-                    # Renormalize to ensure they sum to 1
-                    current_topic_probas_en = torch.div(current_topic_probas_en, current_topic_probas_en.sum(dim=1, keepdim=True))
-                    current_topic_probas_cn = torch.div(current_topic_probas_cn, current_topic_probas_cn.sum(dim=1, keepdim=True))
-                    
-                    # Ensure consistent device/dtype for OT inputs
-                    topic_probas_en_ot = current_topic_probas_en.to(dev, dtype=torch.float32)
-                    topic_probas_cn_ot = current_topic_probas_cn.to(dev, dtype=torch.float32)
-                    
-                    refine_loss = compute_cross_lingual_refine_loss(
-                        topic_probas_en=topic_probas_en_ot,
-                        topic_probas_cn=topic_probas_cn_ot,
-                        topic_indices_en=self.topic_indices_en,
-                        topic_indices_cn=self.topic_indices_cn,
-                        refined_topics=refined_topics,
-                        high_confidence_topics=high_confidence_topics,
-                        vocab_en=self.model.vocab_en,
-                        vocab_cn=self.model.vocab_cn,
-                        word_embeddings_en=self.model.word_embeddings_en,
-                        word_embeddings_cn=self.model.word_embeddings_cn
-                    )
-                    
-                    # Always apply refinement loss with non-zero weight
-                    weighted_refine_loss = self.args.refine_weight * refine_loss
-                    batch_loss = batch_loss + weighted_refine_loss
-                    rst_dict['weighted_refine_loss'] = weighted_refine_loss.detach()
+                    # Add refinement loss if we have refined topics
+                    if (refined_topics is not None and
+                        high_confidence_topics is not None and
+                        hasattr(self.args, 'refine_weight') and
+                        self.args.refine_weight > 0):
 
-                # Add topic embedding similarity loss from Phase 2 onwards
-                if (epoch >= self.args.warmStep and 
-                    hasattr(self, 'topic_embeddings') and
-                    hasattr(self.args, 'topic_sim_weight') and
-                    self.args.topic_sim_weight > 0):
-                    
-                    # Compute topic similarity loss
-                    topic_sim_loss = compute_topic_similarity_loss(
-                        doc_embeddings_en=document_info['doc_embedding_en'],
-                        doc_embeddings_cn=document_info['doc_embedding_cn'],
-                        topic_embeddings=self.topic_embeddings,
-                        theta_en=theta_en,
-                        theta_cn=theta_cn,
-                        temperature=getattr(self.args, 'temperature', 0.1)
-                    )
-                    
-                    # Add weighted topic similarity loss
-                    weighted_topic_sim_loss = self.args.topic_sim_weight * topic_sim_loss
-                    batch_loss = batch_loss + weighted_topic_sim_loss
-                    rst_dict['weighted_topic_sim_loss'] = weighted_topic_sim_loss.detach()
+                        # Compute fresh probabilities from current beta for this batch
+                        dev = self.device
+                        current_beta_en, current_beta_cn = self.model.get_beta()
 
-                for key in rst_dict:
-                    if 'loss' in key:
-                        val = rst_dict[key]
-                        loss_rst_dict[key] += float(val) if torch.is_tensor(val) else float(val)
+                        # Extract probabilities for the same top-k indices identified during refinement
+                        current_topic_probas_en = torch.gather(current_beta_en, 1, self.topic_indices_en)
+                        current_topic_probas_cn = torch.gather(current_beta_cn, 1, self.topic_indices_cn)
 
-                optimizer.zero_grad()
-                batch_loss.backward()
-                # Add gradient clipping before optimizer step
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
-                optimizer.step()
+                        # Renormalize to ensure they sum to 1
+                        current_topic_probas_en = torch.div(current_topic_probas_en, current_topic_probas_en.sum(dim=1, keepdim=True))
+                        current_topic_probas_cn = torch.div(current_topic_probas_cn, current_topic_probas_cn.sum(dim=1, keepdim=True))
 
-                sum_loss += batch_loss.item() * len(batch_bow_en)
+                        # Ensure consistent device/dtype for OT inputs
+                        topic_probas_en_ot = current_topic_probas_en.to(dev, dtype=torch.float32)
+                        topic_probas_cn_ot = current_topic_probas_cn.to(dev, dtype=torch.float32)
 
-            if 'lr_scheduler' in self.args:
-                lr_scheduler.step()
+                        refine_loss = compute_cross_lingual_refine_loss(
+                            topic_probas_en=topic_probas_en_ot,
+                            topic_probas_cn=topic_probas_cn_ot,
+                            topic_indices_en=self.topic_indices_en,
+                            topic_indices_cn=self.topic_indices_cn,
+                            refined_topics=refined_topics,
+                            high_confidence_topics=high_confidence_topics,
+                            vocab_en=self.model.vocab_en,
+                            vocab_cn=self.model.vocab_cn,
+                            word_embeddings_en=self.model.word_embeddings_en,
+                            word_embeddings_cn=self.model.word_embeddings_cn
+                        )
 
-            sum_loss /= data_size
+                        # Always apply refinement loss with non-zero weight
+                        weighted_refine_loss = self.args.refine_weight * refine_loss
+                        batch_loss = batch_loss + weighted_refine_loss
+                        rst_dict['weighted_refine_loss'] = weighted_refine_loss.detach()
 
-            output_log = f'Epoch: {epoch:03d}'
-            for key in loss_rst_dict:
-                output_log += f' {key}: {loss_rst_dict[key] / num_batch :.3f}'
+                    # Add topic embedding similarity loss from Phase 2 onwards
+                    if (hasattr(self, 'topic_embeddings') and
+                        hasattr(self.args, 'topic_sim_weight') and
+                        self.args.topic_sim_weight > 0):
 
-            print(output_log)
+                        # Compute topic similarity loss
+                        topic_sim_loss = compute_topic_similarity_loss(
+                            doc_embeddings_en=document_info['doc_embedding_en'],
+                            doc_embeddings_cn=document_info['doc_embedding_cn'],
+                            topic_embeddings=self.topic_embeddings,
+                            theta_en=theta_en,
+                            theta_cn=theta_cn,
+                            temperature=getattr(self.args, 'temperature', 0.1)
+                        )
 
+                        # Add weighted topic similarity loss
+                        weighted_topic_sim_loss = self.args.topic_sim_weight * topic_sim_loss
+                        batch_loss = batch_loss + weighted_topic_sim_loss
+                        rst_dict['weighted_topic_sim_loss'] = weighted_topic_sim_loss.detach()
+
+                    for key in rst_dict:
+                        if 'loss' in key:
+                            val = rst_dict[key]
+                            loss_rst_dict[key] += float(val) if torch.is_tensor(val) else float(val)
+
+                    optimizer.zero_grad()
+                    batch_loss.backward()
+                    # Add gradient clipping before optimizer step
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+                    optimizer.step()
+
+                    sum_loss += batch_loss.item() * len(batch_bow_en)
+
+                if 'lr_scheduler' in self.args:
+                    lr_scheduler.step()
+
+                sum_loss /= data_size
+
+                output_log = f'Cycle {cycle + 1}, Epoch {epoch:03d}'
+                for key in loss_rst_dict:
+                    output_log += f' {key}: {loss_rst_dict[key] / num_batch :.3f}'
+
+                print(output_log)
 
         beta_en, beta_cn = self.model.get_beta()
         beta_en = beta_en.detach().cpu().numpy()
