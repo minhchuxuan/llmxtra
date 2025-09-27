@@ -28,8 +28,6 @@ def parse_args():
     parser.add_argument('--device', type=int, default=0, help='CUDA device index to use')
     parser.add_argument('--warmStep', default=0, type=int)
     parser.add_argument('--llm_step', type=int, default=30)  # the number of epochs for llm refine
-    parser.add_argument('--ref_loops', type=int, default=1, 
-                        help='Number of times to repeat the LLM refinement phase')
     parser.add_argument('--gemini_api_key', type=str, default=None,
                         help='Google Gemini API key for cross-lingual topic refinement')
     parser.add_argument('--refinement_rounds', type=int, default=5,
@@ -65,8 +63,6 @@ def main():
 
     args = file_utils.update_args(args, f'./configs/model/{args.model}.yaml')
     args.warmStep = args.epochs - args.llm_step
-    # Adjust total epochs for multiple refinement loops
-    args.epochs = args.warmStep + (args.ref_loops * args.llm_step)
     args = file_utils.update_args(args, f'./configs/dataset/{args.dataset}.yaml')
 
     if args.lang2 == "ja":
