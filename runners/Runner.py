@@ -86,9 +86,19 @@ class Runner:
             lr_scheduler = self.make_lr_scheduler(optimizer)
 
         for epoch in range(1, self.args.epochs + 1):
-            # Phase 2: Check if we should extract topic words
+            # Check if we're in a refinement phase (Phase 2)
             print(self.args.warmStep)
-            if epoch >= self.args.warmStep:
+            
+            # Determine if we're at the start of a refinement loop
+            is_refinement_phase = epoch >= self.args.warmStep
+            refinement_loop_start = False
+            if is_refinement_phase:
+                # Calculate which refinement loop we're in (0-indexed)
+                epochs_since_warmup = epoch - self.args.warmStep
+                current_loop = epochs_since_warmup // self.args.llm_step + 1
+                refinement_loop_start = (epochs_since_warmup % self.args.llm_step == 0) and (current_loop <= self.args.ref_loops)
+            
+            if is_refinement_phase:
                 # Extract topic words from current beta
                 beta_en, beta_cn = self.model.get_beta()
                 topic_words_en, topic_words_cn = self.get_topic_words(beta_en, beta_cn, topk_refine=15)
@@ -113,10 +123,14 @@ class Runner:
                 print(f"English topic indices shape: {top_indices_en.shape}")
                 print(f"Chinese topic indices shape: {top_indices_cn.shape}")
                 
-                # Cross-lingual topic refinement using Gemini API (run ONCE at warmStep)
-                if epoch == self.args.warmStep:
+                # Cross-lingual topic refinement using Gemini API (run at start of each refinement loop)
+                if refinement_loop_start:
+                    # Reset refinement state for new loop
+                    self._refinement_done = False
+                    print(f"Starting refinement loop {current_loop}/{self.args.ref_loops}")
+                    
                     refined_topics, high_confidence_topics = None, None
-                    if hasattr(self.args, 'gemini_api_key') and self.args.gemini_api_key and not getattr(self, '_refinement_done', False):
+                    if hasattr(self.args, 'gemini_api_key') and self.args.gemini_api_key:
                         print("Starting cross-lingual topic refinement...")
                         
                         # Compute probabilities for refinement (detached for API call)
@@ -159,10 +173,7 @@ class Runner:
                         print(f"Created topic embeddings with shape: {self.topic_embeddings.shape}")
                         
                     else:
-                        if not hasattr(self.args, 'gemini_api_key') or not self.args.gemini_api_key:
-                            print("No Gemini API key provided, skipping cross-lingual refinement")
-                        else:
-                            print("Skipping refinement (already performed)")
+                        print("No Gemini API key provided, skipping cross-lingual refinement")
 
                 # Ensure refined topics persist after warmStep for loss computation
                 refined_topics = getattr(self, 'refined_topics', None)
