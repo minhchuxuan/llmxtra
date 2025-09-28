@@ -77,6 +77,10 @@ Rules:
 - List topics in order from 0 to {num_topics - 1}
 - Do not include any extra commentary or formatting
 
+- Across ALL topics, do not reuse any word. If a word could fit multiple topics, assign it to the single best topic and replace it elsewhere.
+- For each topic, prioritize words that are specific to the theme and avoid synonyms already used in other topics.
+
+
 Focus on the most coherent and representative single words from both languages for each topic.
 """
         return prompt
