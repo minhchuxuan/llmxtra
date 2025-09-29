@@ -147,7 +147,7 @@ class Runner:
                         R=getattr(self.args, 'refinement_rounds', 5),
                         enable_phase3=getattr(self.args, 'enable_phase3', True),
                         run_phase3=(epoch == self.args.epochs + 1),
-                        skip_phase1_2=getattr(self.args, 'skip_phase1_2', False)
+                        skip_phase2=getattr(self.args, 'skip_phase2', False)
                     )
 
                     print(f"Refined {len(refined_topics)} topics using cross-lingual refinement")

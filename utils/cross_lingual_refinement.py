@@ -528,7 +528,7 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
                                 R: int = 3,
                                 enable_phase3: bool = True,
                                 run_phase3: bool = False,
-                                skip_phase1_2: bool = False) -> Tuple[List[Dict], List[Dict]]:
+                                skip_phase2: bool = False) -> Tuple[List[Dict], List[Dict]]:
     """
     Main function to perform cross-lingual topic refinement for all topics at once
 
@@ -549,14 +549,15 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
         api_key: Gemini API key
         R: Number of refinement rounds
         enable_phase3: Whether to enable Phase 3 (word uniqueness across topics)
+        skip_phase2: Skip Phase 2 (coherence refinement), only run Phase 3 (uniqueness refinement)
 
     Returns:
         Tuple of (refined_topics, high_confidence_topics)
     """
     refiner = CrossLingualTopicRefiner(api_key)
     
-    if skip_phase1_2 and run_phase3:
-        print("Skipping Phase 1-2, running Phase 3 directly on original topic words...")
+    if skip_phase2 and run_phase3:
+        print("Skipping Phase 2 (coherence refinement), running Phase 3 (uniqueness refinement) on original topic words...")
         
         # Convert original topic words to the expected format for Phase 3
         original_topics = []
@@ -579,8 +580,8 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
     else:
         print(f"Starting batch refinement for {len(topic_words_en)} topics with {R} rounds each...")
         
-        # Phase 1 & 2: Process all topics together in each refinement round
-        print("Phase 1-2: Self-consistent refinement...")
+        # Phase 2: Process all topics together in each refinement round (coherence refinement)
+        print("Phase 2: Self-consistent coherence refinement...")
         refined_topics = refiner.self_consistent_refinement(topic_words_en, topic_words_cn, R=R)
         
         # Validate refined words against actual vocabulary

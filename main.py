@@ -40,8 +40,8 @@ def parse_args():
                         help='Enable Phase 3: word uniqueness across topics (replace duplicates with synonyms)')
     parser.add_argument('--epochs_after_phase3', type=int, default=15,
                         help='Number of epochs to continue training after Phase 3 completes')
-    parser.add_argument('--skip_phase1_2', action='store_true', default=False,
-                        help='Skip Phase 1-2 (LLM refinement) and run Phase 3 directly on original topic words')
+    parser.add_argument('--skip_phase2', action='store_true', default=False,
+                        help='Skip Phase 2 (coherence refinement) and run Phase 3 (uniqueness refinement) directly on original topic words')
     # Add missing arguments used in the code
     parser.add_argument('--wandb_prj', type=str, default='ARR-October', help='Wandb project name')
 
