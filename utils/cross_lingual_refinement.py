@@ -379,6 +379,62 @@ FINAL RULES:
 - No extra commentary.
 """
         return prompt
+    def self_consistent_uniqueness(self, high_confidence_topics: List[Dict], R: int = 3) -> List[Dict]:
+        """
+        Self-Consistent Uniqueness: Ask Gemini R times to ensure word uniqueness, count word occurrences
+        
+        Args:
+            high_confidence_topics: Topics with high confidence words
+            R: Number of uniqueness rounds
+            
+        Returns:
+            List of topics with word counts across uniqueness rounds
+        """
+        num_topics = len(high_confidence_topics)
+        
+        # Initialize topic data structures (GIỐNG PHASE 2)
+        unique_topics = []
+        for k in range(num_topics):
+            unique_topics.append({
+                'topic_id': k,
+                'word_counts_en': defaultdict(int),
+                'word_counts_cn': defaultdict(int),
+                'uniqueness_rounds_completed': 0
+            })
+        
+        print(f"Starting uniqueness refinement for {num_topics} topics with {R} rounds...")
+        
+        # Perform R uniqueness rounds
+        for r in range(R):
+            print(f"Phase 3 Uniqueness Round {r + 1}/{R}...")
+            
+            # Create prompt for this round
+            prompt = self.create_uniqueness_prompt(high_confidence_topics)
+            
+            # Call API
+            api_result = self.call_gemini_api(prompt, num_topics)
+            
+            if api_result:
+                # Count word occurrences across rounds
+                for topic_data in api_result:
+                    topic_id = topic_data['topic_id']
+                    en_words = topic_data.get('refined_words_en', [])
+                    cn_words = topic_data.get('refined_words_cn', [])
+                    
+                    # Count occurrences
+                    for word in en_words:
+                        unique_topics[topic_id]['word_counts_en'][word] += 1
+                    for word in cn_words:
+                        unique_topics[topic_id]['word_counts_cn'][word] += 1
+                    
+                    unique_topics[topic_id]['uniqueness_rounds_completed'] += 1
+                
+                print(f"Phase 3 Round {r + 1} completed successfully")
+            else:
+                print(f"Phase 3 Round {r + 1} failed")
+        
+        return unique_topics
+
     def ensure_word_uniqueness(self, high_confidence_topics: List[Dict], max_retries: int = 3) -> List[Dict]:
         """
         Phase 3: Ensure word uniqueness across topics using API
@@ -544,58 +600,27 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
     if enable_phase3 and run_phase3:
         print("Phase 3: Ensuring word uniqueness across topics with self-consistency...")
         
-        # Phase 3 Self-consistent refinement (multiple rounds for uniqueness)
-        phase3_rounds = R  # Use same number of rounds as Phase 1-2
-        unique_topics_list = []
+        # Phase 3 Self-consistent refinement (GIỐNG PHASE 2)
+        print("Phase 3: Self-consistent uniqueness refinement...")
+        unique_topics_with_counts = refiner.self_consistent_uniqueness(high_confidence_topics_with_probs, R=R)
         
-        for round_idx in range(phase3_rounds):
-            print(f"Phase 3 Round {round_idx + 1}/{phase3_rounds}...")
-            
-            if round_idx == 0:
-                # First round: use input topics
-                current_topics = high_confidence_topics_with_probs
-            else:
-                # Subsequent rounds: use results from previous round
-                current_topics = unique_topics_list[-1]
-            
-            # Run uniqueness refinement
-            round_unique_topics = refiner.ensure_word_uniqueness(current_topics)
-            if round_unique_topics:
-                unique_topics_list.append(round_unique_topics)
-        
-        # Use the last round's results
-        final_unique_topics = unique_topics_list[-1] if unique_topics_list else high_confidence_topics_with_probs
-        
-        # Phase 3 Vocabulary validation - convert to proper format first
+        # Phase 3 Vocabulary validation - convert to proper format first (GIỐNG PHASE 2)
         print("Phase 3: Validating unique words against vocabulary...")
         
-        # Convert Phase 3 results to the format expected by validate_words_against_vocab
-        phase3_topics_for_validation = []
-        for topic in final_unique_topics:
-            phase3_topic = {
-                'topic_id': topic['topic_id'],
-                'word_counts_en': {word: 1 for word in topic.get('refined_words_en', [])},
-                'word_counts_cn': {word: 1 for word in topic.get('refined_words_cn', [])}
-            }
-            phase3_topics_for_validation.append(phase3_topic)
+        # Validate unique words against actual vocabulary (GIỐNG PHASE 2)
+        validated_unique_topics = refiner.validate_words_against_vocab(unique_topics_with_counts, vocab_en, vocab_cn)
         
-        validated_unique_topics = refiner.validate_words_against_vocab(phase3_topics_for_validation, vocab_en, vocab_cn)
+        # Extract high-confidence words based on frequency from validated topics (GIỐNG PHASE 2)
+        print("Phase 3: Extracting high-confidence words...")
+        high_confidence_topics_phase3 = refiner.get_high_confidence_words(
+            validated_unique_topics, top_k=15
+        )
         
-        # Convert validated unique topics back to the expected format
-        final_high_confidence_topics = []
-        for topic in validated_unique_topics:
-            topic_data = {
-                'topic_id': topic['topic_id'],
-                'high_confidence_words_en': topic.get('refined_words_en', []),
-                'high_confidence_words_cn': topic.get('refined_words_cn', []),
-                'word_counts_en': {},  # Phase 3 doesn't preserve counts
-                'word_counts_cn': {},
-                'word_probs_en': {},   # Phase 3 doesn't preserve probabilities
-                'word_probs_cn': {}
-            }
-            final_high_confidence_topics.append(topic_data)
+        # Calculate probabilities for high confidence words (GIỐNG PHASE 2)
+        print("Phase 3: Calculating probabilities for high confidence words...")
+        final_high_confidence_topics_with_probs = refiner.calculate_confidence_word_probabilities(high_confidence_topics_phase3)
         
-        return validated_topics, final_high_confidence_topics
+        return validated_topics, final_high_confidence_topics_with_probs
     else:
         if not enable_phase3:
             print("Phase 3 disabled. Returning Phase 2 results.")

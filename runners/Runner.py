@@ -163,13 +163,18 @@ class Runner:
                     self.refined_topics = refined_topics
                     self.high_confidence_topics = high_confidence_topics
                     
-                    # Create topic embeddings from refined words using BGE-M3
+                    # Create topic embeddings from refined words using BGE-M3 (for both Phase 2 and Phase 3)
                     self.topic_embeddings = create_topic_embeddings(
                         high_confidence_topics=high_confidence_topics,
                         encoder_model=None,  # Will load BGE-M3 automatically
                         model_name="BAAI/bge-m3"
                     )
-                    print(f"Created topic embeddings with shape: {self.topic_embeddings.shape}")
+                    
+                    # Log whether this is Phase 2 or Phase 3 refinement
+                    if epoch == self.args.epochs + 1:
+                        print(f"Created topic embeddings for Phase 3 with shape: {self.topic_embeddings.shape}")
+                    else:
+                        print(f"Created topic embeddings for Phase 2 with shape: {self.topic_embeddings.shape}")
                     
                 elif should_refine and (not hasattr(self.args, 'gemini_api_key') or not self.args.gemini_api_key):
                     print("No Gemini API key provided, skipping cross-lingual refinement")
@@ -200,7 +205,7 @@ class Runner:
                 rst_dict = self.model(batch_bow_en, batch_bow_cn)
                 batch_loss = rst_dict['loss']
                 
-                # Add refinement loss if we have refined topics
+                # Add refinement loss if we have refined topics (Phase 2 or Phase 3)
                 if (epoch >= self.args.warmStep and
                     refined_topics is not None and
                     high_confidence_topics is not None and
@@ -239,6 +244,10 @@ class Runner:
                     # Always apply refinement loss with non-zero weight
                     weighted_refine_loss = self.args.refine_weight * refine_loss
                     batch_loss = batch_loss + weighted_refine_loss
+                    
+                    # Log which phase this loss is for
+                    phase_name = "Phase 3" if epoch == self.args.epochs + 1 else "Phase 2"
+                    rst_dict[f'{phase_name.lower().replace(" ", "_")}_weighted_refine_loss'] = weighted_refine_loss.detach()
                     rst_dict['weighted_refine_loss'] = weighted_refine_loss.detach()
 
                 # Add topic embedding similarity loss from Phase 2 onwards
@@ -260,6 +269,10 @@ class Runner:
                     # Add weighted topic similarity loss
                     weighted_topic_sim_loss = self.args.topic_sim_weight * topic_sim_loss
                     batch_loss = batch_loss + weighted_topic_sim_loss
+                    
+                    # Log which phase this loss is for
+                    phase_name = "Phase 3" if epoch == self.args.epochs + 1 else "Phase 2"
+                    rst_dict[f'{phase_name.lower().replace(" ", "_")}_weighted_topic_sim_loss'] = weighted_topic_sim_loss.detach()
                     rst_dict['weighted_topic_sim_loss'] = weighted_topic_sim_loss.detach()
 
                 for key in rst_dict:
