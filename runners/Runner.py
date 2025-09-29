@@ -13,7 +13,6 @@ class Runner:
     def __init__(self, args):
         self.args = args
         self.model = self._create_model(args)
-
         if torch.cuda.is_available():
             self.device = torch.device(f"cuda:{args.device}" if args.device is not None else "cuda:0")
             self.model = self.model.to(self.device)
@@ -85,7 +84,7 @@ class Runner:
         if 'lr_scheduler' in self.args:
             lr_scheduler = self.make_lr_scheduler(optimizer)
 
-        for epoch in range(1, self.args.epochs + 1):
+        for epoch in range(1, self.args.total_epochs + 1):
             # Phase 2: Check if we should extract topic words
             print(self.args.warmStep)
             if epoch >= self.args.warmStep:
@@ -145,7 +144,9 @@ class Runner:
                         vocab_en=self.model.vocab_en,
                         vocab_cn=self.model.vocab_cn,
                         api_key=self.args.gemini_api_key,
-                        R=getattr(self.args, 'refinement_rounds', 5)
+                        R=getattr(self.args, 'refinement_rounds', 5),
+                        enable_phase3=getattr(self.args, 'enable_phase3', True),
+                        run_phase3=(epoch == self.args.epochs + 1)
                     )
 
                     print(f"Refined {len(refined_topics)} topics using cross-lingual refinement")

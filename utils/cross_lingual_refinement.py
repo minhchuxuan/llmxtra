@@ -317,6 +317,113 @@ Focus on the most coherent and representative single words from both languages f
             
         return topics_with_probs
 
+    def create_uniqueness_prompt(self, high_confidence_topics: List[Dict]) -> str:
+        """
+        Create prompt for Phase 3: ensuring word uniqueness across topics
+        
+        Args:
+            high_confidence_topics: Topics with high confidence words
+            
+        Returns:
+            Formatted prompt string for uniqueness refinement
+        """
+        num_topics = len(high_confidence_topics)
+        
+        prompt = f"""You are a cross-lingual topic modeling expert. Given {num_topics} topics with their high-confidence words, your task is to ensure WORD UNIQUENESS across topics while maintaining semantic coherence.
+
+STEP-BY-STEP PROCESS:
+1. FIRST: Identify all duplicate words that appear in multiple topics
+2. SECOND: For each duplicate word, determine which topic it fits most semantically
+3. THIRD: Keep the word in the most relevant topic
+4. FOURTH: Replace the word in other topics with appropriate synonyms
+5. FIFTH: Ensure synonyms don't create new duplicates with existing words
+
+CRITICAL REQUIREMENTS:
+- Each word must appear in ONLY ONE topic across all topics
+- Keep words in their most semantically relevant topic
+- Replace duplicates with synonyms that maintain topic coherence
+- Avoid creating new duplicates when adding synonyms
+- Return exactly 15 DIFFERENT words per language per topic
+- All 15 words must be UNIQUE within each topic (no internal duplicates)
+- Use only SINGLE WORDS (no compound words or phrases)
+
+"""
+        
+        # Add current topic information
+        for topic_data in high_confidence_topics:
+            topic_id = topic_data['topic_id']
+            en_words = topic_data.get('high_confidence_words_en', [])[:15]
+            cn_words = topic_data.get('high_confidence_words_cn', [])[:15]
+            
+            en_words_str = ", ".join(en_words)
+            cn_words_str = ", ".join(cn_words)
+            
+            prompt += f"""
+Topic {topic_id}:
+EN: {en_words_str}
+CN: {cn_words_str}
+"""
+        
+        prompt += f"""
+
+Please provide your response in this EXACT format for ALL {num_topics} topics:
+
+Topic <id>: <brief theme>
+EN: word1 - word2 - ... - word15
+CN: word1 - word2 - ... - word15
+
+FINAL RULES:
+- Each word must appear in ONLY ONE topic across all topics
+- Keep duplicate words in their most semantically relevant topic
+- Replace duplicates in other topics with appropriate synonyms
+- Ensure synonyms don't duplicate existing words
+- Maintain topic coherence and semantic meaning
+- Exactly 15 DIFFERENT words per language per topic
+- Separate words with " - " (space-hyphen-space)
+- List topics in order from 0 to {num_topics - 1}
+- No extra commentary or formatting
+
+Process: Identify duplicates → Keep in best topic → Replace with synonyms → Ensure uniqueness → Verify 15 different words per topic.
+"""
+        return prompt
+
+    def ensure_word_uniqueness(self, high_confidence_topics: List[Dict], max_retries: int = 3) -> List[Dict]:
+        """
+        Phase 3: Ensure word uniqueness across topics using API
+        
+        Args:
+            high_confidence_topics: Topics with high confidence words
+            max_retries: Maximum number of API retries
+            
+        Returns:
+            Topics with unique words across all topics
+        """
+        print(f"Phase 3: Ensuring word uniqueness across {len(high_confidence_topics)} topics...")
+        
+        for attempt in range(max_retries):
+            try:
+                prompt = self.create_uniqueness_prompt(high_confidence_topics)
+                response = self.model.generate_content(prompt)
+                response_text = response.text
+                
+                # Parse the response
+                unique_topics = self._parse_plain_response(response_text, len(high_confidence_topics))
+                
+                if unique_topics:
+                    print(f"Phase 3 completed successfully!")
+                    return unique_topics
+                else:
+                    print(f"Attempt {attempt + 1}: Failed to parse uniqueness response")
+                    
+            except Exception as e:
+                print(f"Uniqueness API call attempt {attempt + 1} failed: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+        
+        print("Phase 3 failed after all retries. Returning original topics.")
+        return high_confidence_topics
+
+
     def validate_words_against_vocab(self, refined_topics: List[Dict], vocab_en: List[str], vocab_cn: List[str]) -> List[Dict]:
         """
         Validate refined words against actual vocabulary files and discard invalid words
@@ -370,7 +477,9 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
                                 vocab_en: List[str],
                                 vocab_cn: List[str],
                                 api_key: str,
-                                R: int = 3) -> Tuple[List[Dict], List[Dict]]:
+                                R: int = 3,
+                                enable_phase3: bool = True,
+                                run_phase3: bool = False) -> Tuple[List[Dict], List[Dict]]:
     """
     Main function to perform cross-lingual topic refinement for all topics at once
 
@@ -379,6 +488,7 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
     2. Self-consistent refinement: Refine top 15 words by removing irrelevant and adding relevant words, repeat R times
     3. Vocabulary validation: Discard refined words not in actual vocabulary files
     4. Frequency-based confidence: Aggregate across rounds for each topic
+    5. Phase 3: Ensure word uniqueness across topics (replace duplicates with synonyms)
 
     Args:
         topic_words_en: English topic words (each with top 15 words)
@@ -388,7 +498,8 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
         vocab_en: English vocabulary list from TextData
         vocab_cn: Chinese vocabulary list from TextData
         api_key: Gemini API key
-        R: Number of refinement rounds to
+        R: Number of refinement rounds
+        enable_phase3: Whether to enable Phase 3 (word uniqueness across topics)
 
     Returns:
         Tuple of (refined_topics, high_confidence_topics)
@@ -397,11 +508,12 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
     
     print(f"Starting batch refinement for {len(topic_words_en)} topics with {R} rounds each...")
     
-    # Process all topics together in each refinement round
+    # Phase 1 & 2: Process all topics together in each refinement round
+    print("Phase 1-2: Self-consistent refinement...")
     refined_topics = refiner.self_consistent_refinement(topic_words_en, topic_words_cn, R=R)
     
     # Validate refined words against actual vocabulary
-    print("Validating refined words against vocabulary...")
+    print("Phase 2: Validating refined words against vocabulary...")
     validated_topics = refiner.validate_words_against_vocab(refined_topics, vocab_en, vocab_cn)
     
     # Extract high-confidence words based on frequency from validated topics
@@ -410,7 +522,32 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
     )
     
     # Calculate probabilities for high confidence words
-    print("Calculating probabilities for high confidence words...")
+    print("Phase 2: Calculating probabilities for high confidence words...")
     high_confidence_topics_with_probs = refiner.calculate_confidence_word_probabilities(high_confidence_topics)
     
-    return validated_topics, high_confidence_topics_with_probs
+    # Phase 3: Ensure word uniqueness across topics (if enabled and requested)
+    if enable_phase3 and run_phase3:
+        print("Phase 3: Ensuring word uniqueness across topics...")
+        unique_topics = refiner.ensure_word_uniqueness(high_confidence_topics_with_probs)
+        
+        # Convert unique topics back to the expected format
+        final_high_confidence_topics = []
+        for topic in unique_topics:
+            topic_data = {
+                'topic_id': topic['topic_id'],
+                'high_confidence_words_en': topic.get('refined_words_en', []),
+                'high_confidence_words_cn': topic.get('refined_words_cn', []),
+                'word_counts_en': {},  # Phase 3 doesn't preserve counts
+                'word_counts_cn': {},
+                'word_probs_en': {},   # Phase 3 doesn't preserve probabilities
+                'word_probs_cn': {}
+            }
+            final_high_confidence_topics.append(topic_data)
+        
+        return validated_topics, final_high_confidence_topics
+    else:
+        if not enable_phase3:
+            print("Phase 3 disabled. Returning Phase 2 results.")
+        else:
+            print("Phase 3 skipped. Returning Phase 2 results.")
+        return validated_topics, high_confidence_topics_with_probs

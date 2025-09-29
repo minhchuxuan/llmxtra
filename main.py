@@ -32,12 +32,16 @@ def parse_args():
                         help='Google Gemini API key for cross-lingual topic refinement')
     parser.add_argument('--refinement_rounds', type=int, default=5,
                         help='Number of self-consistent refinement rounds (R)')
-    parser.add_argument('--refine_frequency', type=int, default=5,
+    parser.add_argument('--refine_frequency', type=int, default=8,
                         help='Frequency of refinement during training (every N epochs after warmStep)')
-    parser.add_argument('--refine_weight', type=float, default=20000,
+    parser.add_argument('--refine_weight', type=float, default=15000,
                         help='Weight for refinement loss (0 disables refinement loss)')
-    parser.add_argument('--topic_sim_weight', type=float, default=20,
+    parser.add_argument('--topic_sim_weight', type=float, default=100,
                         help='Weight for topic embedding similarity loss (0 disables topic similarity loss)')
+    parser.add_argument('--enable_phase3', action='store_true', default=True,
+                        help='Enable Phase 3: word uniqueness across topics (replace duplicates with synonyms)')
+    parser.add_argument('--epochs_after_phase3', type=int, default=15,
+                        help='Number of epochs to continue training after Phase 3 completes')
 
 
 
@@ -65,6 +69,9 @@ def main():
 
     args = file_utils.update_args(args, f'./configs/model/{args.model}.yaml')
     args.warmStep = args.epochs - args.llm_step
+    
+    # Calculate total epochs including Phase 3 and additional training
+    args.total_epochs = args.epochs + 1 + args.epochs_after_phase3
     args = file_utils.update_args(args, f'./configs/dataset/{args.dataset}.yaml')
 
     if args.lang2 == "ja":
