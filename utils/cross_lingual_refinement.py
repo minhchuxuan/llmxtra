@@ -537,12 +537,48 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
     
     # Phase 3: Ensure word uniqueness across topics (if enabled and requested)
     if enable_phase3 and run_phase3:
-        print("Phase 3: Ensuring word uniqueness across topics...")
-        unique_topics = refiner.ensure_word_uniqueness(high_confidence_topics_with_probs)
+        print("Phase 3: Ensuring word uniqueness across topics with self-consistency...")
         
-        # Convert unique topics back to the expected format
+        # Phase 3 Self-consistent refinement (multiple rounds for uniqueness)
+        phase3_rounds = R  # Use same number of rounds as Phase 1-2
+        unique_topics_list = []
+        
+        for round_idx in range(phase3_rounds):
+            print(f"Phase 3 Round {round_idx + 1}/{phase3_rounds}...")
+            
+            if round_idx == 0:
+                # First round: use input topics
+                current_topics = high_confidence_topics_with_probs
+            else:
+                # Subsequent rounds: use results from previous round
+                current_topics = unique_topics_list[-1]
+            
+            # Run uniqueness refinement
+            round_unique_topics = refiner.ensure_word_uniqueness(current_topics)
+            if round_unique_topics:
+                unique_topics_list.append(round_unique_topics)
+        
+        # Use the last round's results
+        final_unique_topics = unique_topics_list[-1] if unique_topics_list else high_confidence_topics_with_probs
+        
+        # Phase 3 Vocabulary validation - convert to proper format first
+        print("Phase 3: Validating unique words against vocabulary...")
+        
+        # Convert Phase 3 results to the format expected by validate_words_against_vocab
+        phase3_topics_for_validation = []
+        for topic in final_unique_topics:
+            phase3_topic = {
+                'topic_id': topic['topic_id'],
+                'word_counts_en': {word: 1 for word in topic.get('refined_words_en', [])},
+                'word_counts_cn': {word: 1 for word in topic.get('refined_words_cn', [])}
+            }
+            phase3_topics_for_validation.append(phase3_topic)
+        
+        validated_unique_topics = refiner.validate_words_against_vocab(phase3_topics_for_validation, vocab_en, vocab_cn)
+        
+        # Convert validated unique topics back to the expected format
         final_high_confidence_topics = []
-        for topic in unique_topics:
+        for topic in validated_unique_topics:
             topic_data = {
                 'topic_id': topic['topic_id'],
                 'high_confidence_words_en': topic.get('refined_words_en', []),
