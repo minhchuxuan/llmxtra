@@ -65,6 +65,13 @@ def main():
     args = parse_args()
 
     args = file_utils.update_args(args, f'./configs/model/{args.model}.yaml')
+    
+    # Adjust LLM steps based on skip_phase2
+    if getattr(args, 'skip_phase2', False):
+        # Skip Phase 2 means no coherence refinement, so reduce LLM steps
+        args.llm_step = 0
+        print(f"Phase 2 skipped: Setting llm_step to 0")
+    
     args.warmStep = args.epochs - args.llm_step
     
     # Calculate total epochs including Phase 3 and additional training
