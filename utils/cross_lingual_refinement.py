@@ -318,12 +318,12 @@ Focus on the most coherent and representative single words from both languages f
         return topics_with_probs
 
     def create_uniqueness_prompt(self, high_confidence_topics: List[Dict]) -> str:
-    """
-    Create prompt for Phase 3: ensuring word uniqueness across topics
-    """
-    num_topics = len(high_confidence_topics)
+        """
+        Create prompt for Phase 3: ensuring word uniqueness across topics
+        """
+        num_topics = len(high_confidence_topics)
 
-    prompt = f"""You are a cross-lingual topic modeling expert. Given {num_topics} topics with their high-confidence words, ensure WORD UNIQUENESS across topics while preserving semantic coherence.
+        prompt = f"""You are a cross-lingual topic modeling expert. Given {num_topics} topics with their high-confidence words, ensure WORD UNIQUENESS across topics while preserving semantic coherence and cross-lingual alignment.
 
 PROCESS:
 1. Identify duplicate words across topics.
@@ -331,6 +331,7 @@ PROCESS:
 3. Replace duplicates in other topics with suitable synonyms.
 4. Ensure replacements do not introduce new duplicates.
 5. Verify each topic has exactly 15 unique words per language.
+6. Maintain cross-lingual coherence between EN and CN word pairs.
 
 REQUIREMENTS:
 - Each word appears in ONLY ONE topic overall.
@@ -338,24 +339,26 @@ REQUIREMENTS:
 - Exactly 15 DIFFERENT single words per language per topic.
 - Use only single words (no compounds/phrases).
 - No internal duplicates within a topic.
+- Cross-lingual coherence: EN and CN words should represent the same semantic concepts.
+- Maintain thematic consistency between languages within each topic.
 """
 
-    # Add current topic information
-    for topic_data in high_confidence_topics:
-        topic_id = topic_data['topic_id']
-        en_words = topic_data.get('high_confidence_words_en', [])[:15]
-        cn_words = topic_data.get('high_confidence_words_cn', [])[:15]
+        # Add current topic information
+        for topic_data in high_confidence_topics:
+            topic_id = topic_data['topic_id']
+            en_words = topic_data.get('high_confidence_words_en', [])[:15]
+            cn_words = topic_data.get('high_confidence_words_cn', [])[:15]
 
-        en_words_str = ", ".join(en_words)
-        cn_words_str = ", ".join(cn_words)
+            en_words_str = ", ".join(en_words)
+            cn_words_str = ", ".join(cn_words)
 
-        prompt += f"""
+            prompt += f"""
 Topic {topic_id}:
 EN: {en_words_str}
 CN: {cn_words_str}
 """
 
-    prompt += f"""
+        prompt += f"""
 
 Provide your response in this format for ALL {num_topics} topics:
 
@@ -369,11 +372,13 @@ FINAL RULES:
 - Replace others with synonyms that do not conflict.
 - Maintain coherence and semantic meaning.
 - Exactly 15 unique words per language per topic.
+- Cross-lingual coherence: EN and CN words must represent the same semantic concepts.
+- Maintain thematic consistency between languages within each topic.
 - Separate words with " - ".
 - List topics in order from 0 to {num_topics - 1}.
 - No extra commentary.
 """
-    return prompt
+        return prompt
     def ensure_word_uniqueness(self, high_confidence_topics: List[Dict], max_retries: int = 3) -> List[Dict]:
         """
         Phase 3: Ensure word uniqueness across topics using API
