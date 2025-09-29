@@ -317,11 +317,11 @@ Focus on the most coherent and representative single words from both languages f
             
         return topics_with_probs
 
-    def create_uniqueness_prompt(self, high_confidence_topics: List[Dict]) -> str:
+    def create_uniqueness_prompt(self, topic_words_en: List[str], topic_words_cn: List[str]) -> str:
         """
         Create prompt for Phase 3: ensuring word uniqueness across topics
         """
-        num_topics = len(high_confidence_topics)
+        num_topics = len(topic_words_en)
 
         prompt = f"""You are a cross-lingual topic modeling expert. Given {num_topics} topics with their high-confidence words, ensure WORD UNIQUENESS across topics while preserving semantic coherence and cross-lingual alignment.
 
@@ -343,17 +343,16 @@ REQUIREMENTS:
 - Maintain thematic consistency between languages within each topic.
 """
 
-        # Add current topic information
-        for topic_data in high_confidence_topics:
-            topic_id = topic_data['topic_id']
-            en_words = topic_data.get('high_confidence_words_en', [])[:15]
-            cn_words = topic_data.get('high_confidence_words_cn', [])[:15]
+        # Add current topic information (GIỐNG PHASE 2)
+        for k in range(num_topics):
+            en_words = topic_words_en[k].split()[:15]
+            cn_words = topic_words_cn[k].split()[:15]
 
             en_words_str = ", ".join(en_words)
             cn_words_str = ", ".join(cn_words)
 
             prompt += f"""
-Topic {topic_id}:
+Topic {k}:
 EN: {en_words_str}
 CN: {cn_words_str}
 """
@@ -379,18 +378,20 @@ FINAL RULES:
 - No extra commentary.
 """
         return prompt
-    def self_consistent_uniqueness(self, high_confidence_topics: List[Dict], R: int = 3) -> List[Dict]:
+    def self_consistent_uniqueness(self, topic_words_en: List[str], topic_words_cn: List[str], R: int = 3) -> List[Dict]:
         """
         Self-Consistent Uniqueness: Ask Gemini R times to ensure word uniqueness, count word occurrences
+        (IDENTICAL TO PHASE 2 EXCEPT PROMPT)
         
         Args:
-            high_confidence_topics: Topics with high confidence words
+            topic_words_en: List of English topic word strings (each with 15 words)
+            topic_words_cn: List of Chinese topic word strings (each with 15 words)
             R: Number of uniqueness rounds
             
         Returns:
             List of topics with word counts across uniqueness rounds
         """
-        num_topics = len(high_confidence_topics)
+        num_topics = len(topic_words_en)
         
         # Initialize topic data structures (GIỐNG PHASE 2)
         unique_topics = []
@@ -399,7 +400,7 @@ FINAL RULES:
                 'topic_id': k,
                 'word_counts_en': defaultdict(int),
                 'word_counts_cn': defaultdict(int),
-                'uniqueness_rounds_completed': 0
+                'refinement_rounds_completed': 0
             })
         
         print(f"Starting uniqueness refinement for {num_topics} topics with {R} rounds...")
@@ -408,30 +409,35 @@ FINAL RULES:
         for r in range(R):
             print(f"Phase 3 Uniqueness Round {r + 1}/{R}...")
             
-            # Create prompt for this round
-            prompt = self.create_uniqueness_prompt(high_confidence_topics)
+            # Create prompt for this round (GIỐNG PHASE 2)
+            prompt = self.create_uniqueness_prompt(topic_words_en, topic_words_cn)
             
-            # Call API
-            api_result = self.call_gemini_api(prompt, num_topics)
+            # Call API (GIỐNG PHASE 2)
+            result = self.call_gemini_api(prompt, expected_num_topics=num_topics)
             
-            if api_result:
-                # Count word occurrences across rounds
-                for topic_data in api_result:
-                    topic_id = topic_data['topic_id']
-                    en_words = topic_data.get('refined_words_en', [])
-                    cn_words = topic_data.get('refined_words_cn', [])
-                    
-                    # Count occurrences
-                    for word in en_words:
-                        unique_topics[topic_id]['word_counts_en'][word] += 1
-                    for word in cn_words:
-                        unique_topics[topic_id]['word_counts_cn'][word] += 1
-                    
-                    unique_topics[topic_id]['uniqueness_rounds_completed'] += 1
+            if not (result and isinstance(result, list)):
+                print(f"Round {r+1}: Failed to get valid API results")
+                continue
                 
-                print(f"Phase 3 Round {r + 1} completed successfully")
-            else:
-                print(f"Phase 3 Round {r + 1} failed")
+            # Process refinement results (GIỐNG PHASE 2)
+            for topic_result in result:
+                if not self._is_valid_topic_result(topic_result, num_topics):
+                    continue
+                    
+                topic_id = topic_result['topic_id']
+                topic_data = unique_topics[topic_id]
+                
+                # Update word counts for both languages (GIỐNG PHASE 2)
+                self._update_word_counts(
+                    topic_data['word_counts_en'], 
+                    topic_result.get('refined_words_en', [])
+                )
+                self._update_word_counts(
+                    topic_data['word_counts_cn'], 
+                    topic_result.get('refined_words_cn', [])
+                )
+                
+                topic_data['refinement_rounds_completed'] += 1
         
         return unique_topics
 
@@ -603,7 +609,7 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
         
         # Phase 3 Self-consistent refinement (GIỐNG PHASE 2)
         print("Phase 3: Self-consistent uniqueness refinement...")
-        unique_topics_with_counts = refiner.self_consistent_uniqueness(high_confidence_topics_with_probs, R=R)
+        unique_topics_with_counts = refiner.self_consistent_uniqueness(topic_words_en, topic_words_cn, R=R)
         
         # Phase 3 Vocabulary validation - convert to proper format first (GIỐNG PHASE 2)
         print("Phase 3: Validating unique words against vocabulary...")
