@@ -318,75 +318,62 @@ Focus on the most coherent and representative single words from both languages f
         return topics_with_probs
 
     def create_uniqueness_prompt(self, high_confidence_topics: List[Dict]) -> str:
-        """
-        Create prompt for Phase 3: ensuring word uniqueness across topics
-        
-        Args:
-            high_confidence_topics: Topics with high confidence words
-            
-        Returns:
-            Formatted prompt string for uniqueness refinement
-        """
-        num_topics = len(high_confidence_topics)
-        
-        prompt = f"""You are a cross-lingual topic modeling expert. Given {num_topics} topics with their high-confidence words, your task is to ensure WORD UNIQUENESS across topics while maintaining semantic coherence.
+    """
+    Create prompt for Phase 3: ensuring word uniqueness across topics
+    """
+    num_topics = len(high_confidence_topics)
 
-STEP-BY-STEP PROCESS:
-1. FIRST: Identify all duplicate words that appear in multiple topics
-2. SECOND: For each duplicate word, determine which topic it fits most semantically
-3. THIRD: Keep the word in the most relevant topic
-4. FOURTH: Replace the word in other topics with appropriate synonyms
-5. FIFTH: Ensure synonyms don't create new duplicates with existing words
+    prompt = f"""You are a cross-lingual topic modeling expert. Given {num_topics} topics with their high-confidence words, ensure WORD UNIQUENESS across topics while preserving semantic coherence.
 
-CRITICAL REQUIREMENTS:
-- Each word must appear in ONLY ONE topic across all topics
-- Keep words in their most semantically relevant topic
-- Replace duplicates with synonyms that maintain topic coherence
-- Avoid creating new duplicates when adding synonyms
-- Return exactly 15 DIFFERENT words per language per topic
-- All 15 words must be UNIQUE within each topic (no internal duplicates)
-- Use only SINGLE WORDS (no compound words or phrases)
+PROCESS:
+1. Identify duplicate words across topics.
+2. Keep each duplicate in the most semantically relevant topic.
+3. Replace duplicates in other topics with suitable synonyms.
+4. Ensure replacements do not introduce new duplicates.
+5. Verify each topic has exactly 15 unique words per language.
 
+REQUIREMENTS:
+- Each word appears in ONLY ONE topic overall.
+- Words must fit their topic semantically.
+- Exactly 15 DIFFERENT single words per language per topic.
+- Use only single words (no compounds/phrases).
+- No internal duplicates within a topic.
 """
-        
-        # Add current topic information
-        for topic_data in high_confidence_topics:
-            topic_id = topic_data['topic_id']
-            en_words = topic_data.get('high_confidence_words_en', [])[:15]
-            cn_words = topic_data.get('high_confidence_words_cn', [])[:15]
-            
-            en_words_str = ", ".join(en_words)
-            cn_words_str = ", ".join(cn_words)
-            
-            prompt += f"""
+
+    # Add current topic information
+    for topic_data in high_confidence_topics:
+        topic_id = topic_data['topic_id']
+        en_words = topic_data.get('high_confidence_words_en', [])[:15]
+        cn_words = topic_data.get('high_confidence_words_cn', [])[:15]
+
+        en_words_str = ", ".join(en_words)
+        cn_words_str = ", ".join(cn_words)
+
+        prompt += f"""
 Topic {topic_id}:
 EN: {en_words_str}
 CN: {cn_words_str}
 """
-        
-        prompt += f"""
 
-Please provide your response in this EXACT format for ALL {num_topics} topics:
+    prompt += f"""
 
-Topic <id>: <brief theme>
-EN: word1 - word2 - ... - word15
+Provide your response in this format for ALL {num_topics} topics:
+
+Topic <id>: <brief theme>  
+EN: word1 - word2 - ... - word15  
 CN: word1 - word2 - ... - word15
 
 FINAL RULES:
-- Each word must appear in ONLY ONE topic across all topics
-- Keep duplicate words in their most semantically relevant topic
-- Replace duplicates in other topics with appropriate synonyms
-- Ensure synonyms don't duplicate existing words
-- Maintain topic coherence and semantic meaning
-- Exactly 15 DIFFERENT words per language per topic
-- Separate words with " - " (space-hyphen-space)
-- List topics in order from 0 to {num_topics - 1}
-- No extra commentary or formatting
-
-Process: Identify duplicates → Keep in best topic → Replace with synonyms → Ensure uniqueness → Verify 15 different words per topic.
+- Words must be unique across all topics.
+- Keep duplicates in the most relevant topic.
+- Replace others with synonyms that do not conflict.
+- Maintain coherence and semantic meaning.
+- Exactly 15 unique words per language per topic.
+- Separate words with " - ".
+- List topics in order from 0 to {num_topics - 1}.
+- No extra commentary.
 """
-        return prompt
-
+    return prompt
     def ensure_word_uniqueness(self, high_confidence_topics: List[Dict], max_retries: int = 3) -> List[Dict]:
         """
         Phase 3: Ensure word uniqueness across topics using API
@@ -479,7 +466,8 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
                                 api_key: str,
                                 R: int = 3,
                                 enable_phase3: bool = True,
-                                run_phase3: bool = False) -> Tuple[List[Dict], List[Dict]]:
+                                run_phase3: bool = False,
+                                skip_phase1_2: bool = False) -> Tuple[List[Dict], List[Dict]]:
     """
     Main function to perform cross-lingual topic refinement for all topics at once
 
@@ -506,24 +494,46 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
     """
     refiner = CrossLingualTopicRefiner(api_key)
     
-    print(f"Starting batch refinement for {len(topic_words_en)} topics with {R} rounds each...")
-    
-    # Phase 1 & 2: Process all topics together in each refinement round
-    print("Phase 1-2: Self-consistent refinement...")
-    refined_topics = refiner.self_consistent_refinement(topic_words_en, topic_words_cn, R=R)
-    
-    # Validate refined words against actual vocabulary
-    print("Phase 2: Validating refined words against vocabulary...")
-    validated_topics = refiner.validate_words_against_vocab(refined_topics, vocab_en, vocab_cn)
-    
-    # Extract high-confidence words based on frequency from validated topics
-    high_confidence_topics = refiner.get_high_confidence_words(
-        validated_topics, top_k=15
-    )
-    
-    # Calculate probabilities for high confidence words
-    print("Phase 2: Calculating probabilities for high confidence words...")
-    high_confidence_topics_with_probs = refiner.calculate_confidence_word_probabilities(high_confidence_topics)
+    if skip_phase1_2 and run_phase3:
+        print("Skipping Phase 1-2, running Phase 3 directly on original topic words...")
+        
+        # Convert original topic words to the expected format for Phase 3
+        original_topics = []
+        for i in range(len(topic_words_en)):
+            en_words = topic_words_en[i].split()[:15]
+            cn_words = topic_words_cn[i].split()[:15]
+            original_topics.append({
+                'topic_id': i,
+                'high_confidence_words_en': en_words,
+                'high_confidence_words_cn': cn_words,
+                'word_counts_en': {},
+                'word_counts_cn': {},
+                'word_probs_en': {},
+                'word_probs_cn': {}
+            })
+        
+        high_confidence_topics_with_probs = original_topics
+        validated_topics = []  # Empty for consistency
+        
+    else:
+        print(f"Starting batch refinement for {len(topic_words_en)} topics with {R} rounds each...")
+        
+        # Phase 1 & 2: Process all topics together in each refinement round
+        print("Phase 1-2: Self-consistent refinement...")
+        refined_topics = refiner.self_consistent_refinement(topic_words_en, topic_words_cn, R=R)
+        
+        # Validate refined words against actual vocabulary
+        print("Phase 2: Validating refined words against vocabulary...")
+        validated_topics = refiner.validate_words_against_vocab(refined_topics, vocab_en, vocab_cn)
+        
+        # Extract high-confidence words based on frequency from validated topics
+        high_confidence_topics = refiner.get_high_confidence_words(
+            validated_topics, top_k=15
+        )
+        
+        # Calculate probabilities for high confidence words
+        print("Phase 2: Calculating probabilities for high confidence words...")
+        high_confidence_topics_with_probs = refiner.calculate_confidence_word_probabilities(high_confidence_topics)
     
     # Phase 3: Ensure word uniqueness across topics (if enabled and requested)
     if enable_phase3 and run_phase3:
