@@ -4,6 +4,7 @@ from torch.optim.lr_scheduler import StepLR
 from collections import defaultdict
 from models.InfoCTM import InfoCTM
 from models.NMTM import NMTM
+from models.XTRA import XTRA
 from utils.cross_lingual_refinement import refine_cross_lingual_topics, CrossLingualTopicRefiner
 from utils.cross_lingual_refine_loss import compute_cross_lingual_refine_loss
 from utils.topic_embedding_loss import create_topic_embeddings, compute_topic_similarity_loss
@@ -45,8 +46,10 @@ class Runner:
                 dropout=args.dropout,
                 lam=args.lam
             )
+        elif args.model == 'XTRA':
+            model = XTRA(args)
         else:
-            raise ValueError(f"Unsupported model: {args.model}. Supported models: InfoCTM, NMTM")
+            raise ValueError(f"Unsupported model: {args.model}. Supported models: InfoCTM, NMTM, XTRA")
         
         # Add required attributes to the model for compatibility with existing Runner code
         model.vocab_en = args.vocab_en
@@ -187,15 +190,22 @@ class Runner:
                 batch_bow_en = batch_data['bow_en']
                 batch_bow_cn = batch_data['bow_cn']
                 document_info = {
-                'doc_embedding_en': batch_data['doc_embedding_en'],
-                'doc_embedding_cn': batch_data['doc_embedding_cn']
+                'doc_embedding_en': batch_data.get('doc_embedding_en'),
+                'doc_embedding_cn': batch_data.get('doc_embedding_cn')
+                }
+                cluster_info = {
+                'cluster_en': batch_data.get('cluster_en'),
+                'cluster_cn': batch_data.get('cluster_cn')
                 }
                 # Get theta from model for topic similarity loss
                 theta_en, _, _ = self.model.get_theta(batch_bow_en, lang='en')
                 theta_cn, _, _ = self.model.get_theta(batch_bow_cn, lang='cn')
                 
                 # Forward pass
-                rst_dict = self.model(batch_bow_en, batch_bow_cn)
+                if isinstance(self.model, XTRA):
+                    rst_dict = self.model(batch_bow_en, batch_bow_cn, document_info=document_info, cluster_info=cluster_info)
+                else:
+                    rst_dict = self.model(batch_bow_en, batch_bow_cn)
                 batch_loss = rst_dict['loss']
                 
                 # Add refinement loss if we have refined topics

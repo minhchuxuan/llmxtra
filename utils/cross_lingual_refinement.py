@@ -39,7 +39,9 @@ class CrossLingualTopicRefiner:
 2. Identify the main theme that connects these words across both languages for each topic
 3. Remove any irrelevant or noisy words that don't fit the coherent theme
 4. Add relevant words that strengthen the topic coherence and cross-lingual representation
-5. Return exactly 20 words per language for each refined topic
+5. Across ALL topics, do not reuse any word. If a word could fit multiple topics, assign it to the single best topic and replace it elsewhere.
+6. For each topic, prioritize words that are specific to the theme and avoid words already used in other topics.
+7. Return exactly 20 words per language for each refined topic
 
 IMPORTANT: Use only SINGLE WORDS, not compound words or phrases. Each word should be a standalone term.
 Examples: 
@@ -77,8 +79,6 @@ Rules:
 - List topics in order from 0 to {num_topics - 1}
 - Do not include any extra commentary or formatting
 
-- Across ALL topics, do not reuse any word. If a word could fit multiple topics, assign it to the single best topic and replace it elsewhere.
-- For each topic, prioritize words that are specific to the theme and avoid synonyms already used in other topics.
 
 
 Focus on the most coherent and representative single words from both languages for each topic.

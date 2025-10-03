@@ -78,6 +78,9 @@ def main():
         model_params = f"weightMI_{args.weight_MI}"
     elif args.model == 'NMTM':
         model_params = f"lam_{args.lam}"
+    elif args.model == 'XTRA':
+        # Summarize key hyperparameters for experiment grouping
+        model_params = f"K{args.num_topic}_sd{getattr(args, 'share_dim', 1000)}_wc{getattr(args, 'weight_cluster', 0.0)}_wb{getattr(args, 'weight_beta', 0.0)}_win{getattr(args, 'weight_InfoNCE', 0.0)}"
     else:
         # Fallback for other models
         model_params = "default"
@@ -96,8 +99,8 @@ def main():
 
     dataset_handler = DatasetHandler(args.dataset, args.batch_size, args.lang1, args.lang2, args.num_topic, device=args.device)
 
-    args.doc_embeddings_en=dataset_handler.doc_embeddings_en
-    args.doc_embeddings_cn=dataset_handler.doc_embeddings_cn
+    args.doc_embeddings_en = dataset_handler.doc_embeddings_en
+    args.doc_embeddings_cn = dataset_handler.doc_embeddings_cn
 
 
     args.vocab_size_en = len(dataset_handler.vocab_en)
@@ -118,6 +121,13 @@ def main():
     args.pretrained_WE_cn = dataset_handler.pretrained_WE_cn
     args.Map_en2cn = dataset_handler.Map_en2cn
     args.Map_cn2en = dataset_handler.Map_cn2en
+
+    # XTRA initialization support
+    if args.model == 'XTRA':
+        args.beta_en = getattr(dataset_handler, 'beta_en', None)
+        args.beta_cn = getattr(dataset_handler, 'beta_cn', None)
+        args.mu_prior = getattr(dataset_handler, 'mu_prior', None)
+        args.var_prior = getattr(dataset_handler, 'var_prior', None)
     
 
     runner = Runner(args)

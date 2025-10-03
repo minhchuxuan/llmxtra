@@ -2,7 +2,7 @@ learning_rate: 0.002
 lr_scheduler: StepLR
 lr_step_size: 125
 lr_gamma: 0.5
-epochs: 500
+epochs: 530
 batch_size: 128
 
 en1_units: 100
