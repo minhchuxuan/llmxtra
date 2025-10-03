@@ -41,9 +41,9 @@ class BilingualTextDataset(Dataset):
 
 class DatasetHandler:
     """
-    Dataset helper for XTRA and compatible with existing main.py
+    Dataset helper that conditionally loads attributes per model to reduce overhead.
     """
-    def __init__(self, dataset_name, batch_size, lang1, lang2, num_topics, device=0):
+    def __init__(self, dataset_name, batch_size, lang1, lang2, num_topics, device=0, model_name=None):
         data_dir = f'./data/{dataset_name}'
         self.device = device
         self.batch_size = batch_size
@@ -67,62 +67,98 @@ class DatasetHandler:
         self.doc_embeddings_en = np.load(os.path.join(data_dir, f'doc_embeddings_{lang1}_train.npy'))
         self.doc_embeddings_cn = np.load(os.path.join(data_dir, f'doc_embeddings_{lang2}_train.npy'))
 
-        # Load word embeddings (optional)
+        # Load word embeddings (optional, used by topic similarity loss)
         we_en_path = os.path.join(data_dir, f'word_embeddings_{lang1}.npy')
         we_cn_path = os.path.join(data_dir, f'word_embeddings_{lang2}.npy')
         self.word_embeddings_en = np.load(we_en_path) if os.path.exists(we_en_path) else None
         self.word_embeddings_cn = np.load(we_cn_path) if os.path.exists(we_cn_path) else None
 
-        # Fallback to sparse word2vec if needed (for InfoCTM compatibility)
-        try:
-            self.pretrained_WE_en = scipy.sparse.load_npz(os.path.join(data_dir, f'word2vec_{lang1}.npz')).toarray()
-            self.pretrained_WE_cn = scipy.sparse.load_npz(os.path.join(data_dir, f'word2vec_{lang2}.npz')).toarray()
-        except Exception:
-            self.pretrained_WE_en = None
-            self.pretrained_WE_cn = None
+        # Initialize optional attributes to None
+        self.clusterinfo_en, self.clusterinfo_cn = None, None
+        self.beta_en, self.beta_cn = None, None
+        self.mu_prior, self.var_prior = None, None
+        self.pretrained_WE_en, self.pretrained_WE_cn = None, None
+        self.trans_dict = None
+        self.trans_matrix_en, self.trans_matrix_cn = None, None
+        self.Map_en2cn, self.Map_cn2en = None, None
 
-        # Load cluster information
-        self.clusterinfo_en = np.load(os.path.join(data_dir, f'cluster_labels_{lang1}_cosine.npy'))
-        self.clusterinfo_cn = np.load(os.path.join(data_dir, f'cluster_labels_{lang2}_cosine.npy'))
-
-        # Translation dictionary and maps for compatibility with other models
-        if lang2 == "ja":
-            dict_path = 'data/dict/MUSE/ja-en.txt'
+        # Conditional loads per model to reduce overhead
+        if model_name == 'InfoCTM':
+            # Load translation dictionary and pretrained WE
+            if lang2 == "ja":
+                dict_path = 'data/dict/MUSE/ja-en.txt'
+            else:
+                dict_path = 'data/dict/ch_en_dict.dat'
+            (self.trans_dict,
+             self.trans_matrix_en,
+             self.trans_matrix_cn) = self.parse_dictionary(dict_path)
+            try:
+                self.pretrained_WE_en = scipy.sparse.load_npz(os.path.join(data_dir, f'word2vec_{lang1}.npz')).toarray()
+                self.pretrained_WE_cn = scipy.sparse.load_npz(os.path.join(data_dir, f'word2vec_{lang2}.npz')).toarray()
+            except Exception:
+                self.pretrained_WE_en, self.pretrained_WE_cn = None, None
+        elif model_name == 'NMTM':
+            # Load translation dictionary and compute Maps
+            if lang2 == "ja":
+                dict_path = 'data/dict/MUSE/ja-en.txt'
+            else:
+                dict_path = 'data/dict/ch_en_dict.dat'
+            (self.trans_dict,
+             self.trans_matrix_en,
+             self.trans_matrix_cn) = self.parse_dictionary(dict_path)
+            self.Map_en2cn = self.get_Map(self.trans_matrix_en, self.train_bow_matrix_en)
+            self.Map_cn2en = self.get_Map(self.trans_matrix_cn, self.train_bow_matrix_cn)
+        elif model_name == 'XTRA':
+            # Load cluster info and compute beta/prior
+            self.clusterinfo_en = np.load(os.path.join(data_dir, f'cluster_labels_{lang1}_cosine.npy'))
+            self.clusterinfo_cn = np.load(os.path.join(data_dir, f'cluster_labels_{lang2}_cosine.npy'))
+            self.beta_en = self.calculate_beta(
+                self.train_bow_matrix_en, self.clusterinfo_en, self.vocab_size_en, num_topics=num_topics
+            )
+            self.beta_cn = self.calculate_beta(
+                self.train_bow_matrix_cn, self.clusterinfo_cn, self.vocab_size_cn, num_topics=num_topics
+            )
+            self.mu_prior, self.var_prior = self.calculate_cluster_based_prior(num_topics=num_topics)
         else:
-            dict_path = 'data/dict/ch_en_dict.dat'
-        (self.trans_dict,
-         self.trans_matrix_en,
-         self.trans_matrix_cn) = self.parse_dictionary(dict_path)
-        self.Map_en2cn = self.get_Map(self.trans_matrix_en, self.train_bow_matrix_en)
-        self.Map_cn2en = self.get_Map(self.trans_matrix_cn, self.train_bow_matrix_cn)
+            # Default: maintain previous behavior for unknown/legacy
+            if lang2 == "ja":
+                dict_path = 'data/dict/MUSE/ja-en.txt'
+            else:
+                dict_path = 'data/dict/ch_en_dict.dat'
+            (self.trans_dict,
+             self.trans_matrix_en,
+             self.trans_matrix_cn) = self.parse_dictionary(dict_path)
+            self.Map_en2cn = self.get_Map(self.trans_matrix_en, self.train_bow_matrix_en)
+            self.Map_cn2en = self.get_Map(self.trans_matrix_cn, self.train_bow_matrix_cn)
+            try:
+                self.pretrained_WE_en = scipy.sparse.load_npz(os.path.join(data_dir, f'word2vec_{lang1}.npz')).toarray()
+                self.pretrained_WE_cn = scipy.sparse.load_npz(os.path.join(data_dir, f'word2vec_{lang2}.npz')).toarray()
+            except Exception:
+                self.pretrained_WE_en, self.pretrained_WE_cn = None, None
+            try:
+                self.clusterinfo_en = np.load(os.path.join(data_dir, f'cluster_labels_{lang1}_cosine.npy'))
+                self.clusterinfo_cn = np.load(os.path.join(data_dir, f'cluster_labels_{lang2}_cosine.npy'))
+                self.beta_en = self.calculate_beta(
+                    self.train_bow_matrix_en, self.clusterinfo_en, self.vocab_size_en, num_topics=num_topics
+                )
+                self.beta_cn = self.calculate_beta(
+                    self.train_bow_matrix_cn, self.clusterinfo_cn, self.vocab_size_cn, num_topics=num_topics
+                )
+                self.mu_prior, self.var_prior = self.calculate_cluster_based_prior(num_topics=num_topics)
+            except Exception:
+                pass
 
-        # Initialize beta using clusters and compute priors
-        self.beta_en = self.calculate_beta(
-            self.train_bow_matrix_en, self.clusterinfo_en, self.vocab_size_en, num_topics=num_topics
-        )
-        self.beta_cn = self.calculate_beta(
-            self.train_bow_matrix_cn, self.clusterinfo_cn, self.vocab_size_cn, num_topics=num_topics
-        )
-        self.mu_prior, self.var_prior = self.calculate_cluster_based_prior(num_topics=num_topics)
-
-        # Move to device
-        (self.doc_embeddings_en,
-         self.doc_embeddings_cn,
-         self.clusterinfo_en,
-         self.clusterinfo_cn,
-         self.train_bow_matrix_en,
-         self.test_bow_matrix_en,
-         self.train_bow_matrix_cn,
-         self.test_bow_matrix_cn) = self.move_to_cuda(
-            self.doc_embeddings_en,
-            self.doc_embeddings_cn,
-            self.clusterinfo_en,
-            self.clusterinfo_cn,
-            self.train_bow_matrix_en,
-            self.test_bow_matrix_en,
-            self.train_bow_matrix_cn,
-            self.test_bow_matrix_cn
-        )
+        # Move commonly used arrays to device; keep others on CPU if None
+        self.doc_embeddings_en = self.move_to_cuda(self.doc_embeddings_en)
+        self.doc_embeddings_cn = self.move_to_cuda(self.doc_embeddings_cn)
+        self.train_bow_matrix_en = self.move_to_cuda(self.train_bow_matrix_en)
+        self.test_bow_matrix_en = self.move_to_cuda(self.test_bow_matrix_en)
+        self.train_bow_matrix_cn = self.move_to_cuda(self.train_bow_matrix_cn)
+        self.test_bow_matrix_cn = self.move_to_cuda(self.test_bow_matrix_cn)
+        if self.clusterinfo_en is not None:
+            self.clusterinfo_en = self.move_to_cuda(self.clusterinfo_en)
+        if self.clusterinfo_cn is not None:
+            self.clusterinfo_cn = self.move_to_cuda(self.clusterinfo_cn)
 
         # Create loaders
         self.train_loader = DataLoader(
@@ -201,37 +237,53 @@ class DatasetHandler:
 
     def calculate_beta(self, bow_np, cluster_np, vocab_size, num_topics, epsilon=1e-8):
         beta = np.zeros((num_topics, vocab_size), dtype=np.float32)
+
         for doc_idx, cluster_id in enumerate(cluster_np):
             if cluster_id < num_topics:
                 beta[cluster_id] += bow_np[doc_idx]
+
         row_sums = beta.sum(axis=1, keepdims=True)
         beta = beta / np.maximum(row_sums, epsilon)
+
         doc_freq = np.count_nonzero(beta > 0, axis=0)
         idf = np.log((num_topics + 1) / (doc_freq + 1)) + 1
+
         beta = beta * idf
         row_sums = beta.sum(axis=1, keepdims=True)
         beta = beta / np.maximum(row_sums, epsilon) + epsilon
         return beta
-
+    
     def calculate_cluster_based_prior(self, num_topics, smoothing_count=0, epsilon=1e-6):
         labels_l1 = self.clusterinfo_en
         labels_l2 = self.clusterinfo_cn
+        
         all_labels = np.concatenate((labels_l1, labels_l2))
+        
         counts_array = np.zeros(num_topics, dtype=np.float32)
         for label in all_labels:
-            if 0 <= label < num_topics:
+            if 0 <= label < num_topics: 
                 counts_array[int(label)] += 1
+        
+        # Tạo mảng đếm và làm mịn
         smoothed_counts = counts_array + smoothing_count
         total_docs = smoothed_counts.sum()
+            
+        # Tính toán tham số prior
         avg_count = total_docs / num_topics
         a_new = (smoothed_counts / (avg_count + epsilon)) + epsilon
         a_new = np.maximum(a_new, epsilon)
         a_new = a_new.reshape(1, -1)
+        
+        # Chuyển đổi sang tham số Logistic-Normal
         log_a_new = np.log(a_new)
         mu_prior = (log_a_new.T - np.mean(log_a_new, 1, keepdims=True)).T
+        
+        # Tính variance
         term1 = (1.0 / a_new) * (1 - (2.0 / num_topics))
         term2 = (1.0 / (num_topics * num_topics)) * np.sum(1.0 / a_new, 1, keepdims=True)
         var_prior = term1 + term2
+        
+        # Làm gọn kết quả
         mu_prior = mu_prior.squeeze()
         var_prior = var_prior.squeeze()
         return mu_prior.astype(np.float32), var_prior.astype(np.float32)

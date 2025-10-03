@@ -97,10 +97,10 @@ def main():
     print('\n' + yaml.dump(vars(args), default_flow_style=False))
     
 
-    dataset_handler = DatasetHandler(args.dataset, args.batch_size, args.lang1, args.lang2, args.num_topic, device=args.device)
+    dataset_handler = DatasetHandler(args.dataset, args.batch_size, args.lang1, args.lang2, args.num_topic, device=args.device, model_name=args.model)
 
-    args.doc_embeddings_en = dataset_handler.doc_embeddings_en
-    args.doc_embeddings_cn = dataset_handler.doc_embeddings_cn
+    args.doc_embeddings_en = getattr(dataset_handler, 'doc_embeddings_en', None)
+    args.doc_embeddings_cn = getattr(dataset_handler, 'doc_embeddings_cn', None)
 
 
     args.vocab_size_en = len(dataset_handler.vocab_en)
@@ -110,17 +110,18 @@ def main():
     args.vocab_en = dataset_handler.vocab_en
     args.vocab_cn = dataset_handler.vocab_cn
 
-    # Pass word embeddings to args
-    args.word_embeddings_en = dataset_handler.word_embeddings_en
-    args.word_embeddings_cn = dataset_handler.word_embeddings_cn
-    
-    # Pass additional attributes needed for InfoCTM and NMTM
-    args.trans_matrix_en = dataset_handler.trans_matrix_en
-    args.trans_matrix_cn = dataset_handler.trans_matrix_cn
-    args.pretrained_WE_en = dataset_handler.pretrained_WE_en
-    args.pretrained_WE_cn = dataset_handler.pretrained_WE_cn
-    args.Map_en2cn = dataset_handler.Map_en2cn
-    args.Map_cn2en = dataset_handler.Map_cn2en
+    # Pass word embeddings to args (optional for XTRA)
+    args.word_embeddings_en = getattr(dataset_handler, 'word_embeddings_en', None)
+    args.word_embeddings_cn = getattr(dataset_handler, 'word_embeddings_cn', None)
+
+    # Pass only required attributes per model
+    if args.model == 'InfoCTM':
+        args.trans_matrix_en = getattr(dataset_handler, 'trans_matrix_en', None)
+        args.pretrained_WE_en = getattr(dataset_handler, 'pretrained_WE_en', None)
+        args.pretrained_WE_cn = getattr(dataset_handler, 'pretrained_WE_cn', None)
+    elif args.model == 'NMTM':
+        args.Map_en2cn = getattr(dataset_handler, 'Map_en2cn', None)
+        args.Map_cn2en = getattr(dataset_handler, 'Map_cn2en', None)
 
     # XTRA initialization support
     if args.model == 'XTRA':
