@@ -1,5 +1,12 @@
-python main.py --model XTRA --seed 0 --dataset Amazon_Review --weight_cluster 10 --weight_beta 15 --weight_InfoNCE 85 --device 0
-python main.py --model XTRA --seed 0 --dataset ECNews --weight_cluster 5 --weight_beta 7 --weight_InfoNCE 80 --device 0
-python main.py --model XTRA --seed 7 --dataset Rakuten_Amazon --weight_cluster 10 --weight_beta 7 --weight_InfoNCE 70 --device 0
+#!/bin/bash
 
+echo "Usage: bash run.sh <MODEL> <DATASET> [SEED] [DEVICE]"
+echo "Example: bash run.sh XTRA Amazon_Review 0 0"
+
+MODEL=${1:-XTRA}
+DATASET=${2:-Amazon_Review}
+SEED=${3:-0}
+DEVICE=${4:-0}
+
+python main.py --model ${MODEL} --dataset ${DATASET} --seed ${SEED} --device ${DEVICE} --gemini_api_key $GEMINI_API_KEY
 
