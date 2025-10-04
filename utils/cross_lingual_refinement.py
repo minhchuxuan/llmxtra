@@ -1,24 +1,54 @@
-import google.generativeai as genai
 import torch
 import numpy as np
 from collections import Counter, defaultdict
 import re
 import time
 from typing import List, Dict, Tuple, Union
+import warnings
+
+warnings.filterwarnings("ignore")
+
+try:
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    print("Warning: transformers not available. Install with: pip install transformers")
 
 
 class CrossLingualTopicRefiner:
-    def __init__(self, api_key: str, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, api_key: str = None, model_name: str = "Qwen/Qwen2.5-32B-Instruct"):
         """
-        Initialize the cross-lingual topic refiner with Gemini API
+        Initialize the cross-lingual topic refiner with local Qwen model
         
         Args:
-            api_key: Google Gemini API key
-            model_name: Gemini model name to use
+            api_key: Ignored (kept for compatibility with existing code)
+            model_name: Path to Qwen model (default: Qwen/Qwen2.5-32B-Instruct)
         """
-    
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
+        print("Using local Qwen model - no API key required!")
+        if not TRANSFORMERS_AVAILABLE:
+            raise ImportError("transformers library is required. Install with: pip install transformers")
+            
+        print(f"Loading Qwen model: {model_name}")
+        
+        # Load tokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            model_name, 
+            trust_remote_code=True,
+            padding_side="left"
+        )
+        
+        # Load model
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            trust_remote_code=True,
+            low_cpu_mem_usage=True
+        )
+        
+        self.model.eval()
+        print("Qwen model loaded successfully!")
     
     def create_refinement_prompt(self, topic_words_en: List[str], topic_words_cn: List[str]) -> str:
         """
@@ -99,100 +129,107 @@ Focus on the most coherent and representative single words from both languages f
             theme = m.group(2).strip()
             en_words = []
             cn_words = []
-            if i + 1 < len(lines) and lines[i+1].startswith("EN:"):
-                en_line = lines[i+1][3:].strip()
-                # Support both hyphen-separated and comma-separated
-                if ' - ' in en_line:
-                    en_words = [w.strip() for w in en_line.split(' - ') if w.strip()]
-                else:
-                    en_words = [w.strip() for w in en_line.split(',') if w.strip()]
-            if i + 2 < len(lines) and lines[i+2].startswith("CN:"):
-                cn_line = lines[i+2][3:].strip()
-                if ' - ' in cn_line:
-                    cn_words = [w.strip() for w in cn_line.split(' - ') if w.strip()]
-                else:
-                    cn_words = [w.strip() for w in cn_line.split(',') if w.strip()]
-            if en_words and cn_words:
-                topics.append({
-                    'topic_id': topic_id,
-                    'topic_theme': theme,
-                    'refined_words_en': en_words,
-                    'refined_words_cn': cn_words
-                })
-                i += 3
-            else:
+            
+            # Look for EN: and CN: lines
+            i += 1
+            while i < len(lines):
+                line = lines[i]
+                if re.match(r"^Topic\s+\d+\s*:", line):
+                    break
+                if line.startswith("EN:"):
+                    en_words = [w.strip() for w in line[3:].split("-") if w.strip()]
+                elif line.startswith("CN:"):
+                    cn_words = [w.strip() for w in line[3:].split("-") if w.strip()]
                 i += 1
-        # Basic validation
-        topics = sorted(topics, key=lambda t: t['topic_id'])
-        topics = [t for t in topics if 0 <= t['topic_id'] < expected_num_topics]
-        return topics if topics else None
-
-    def _check_word_counts(self, topics: List[Dict], expected_count: int = 20) -> bool:
-        """Return True if each topic has at least expected_count EN and CN words."""
-        if not topics:
-            return False
-        ok = True
-        for t in topics:
-            en = t.get('refined_words_en', [])
-            cn = t.get('refined_words_cn', [])
-            if len(en) < expected_count or len(cn) < expected_count:
-                tid = t.get('topic_id')
-                print(f"Format check failed for topic {tid}: EN={len(en)}, CN={len(cn)} (expected at least {expected_count}).")
-                ok = False
-        return ok
-
-    def call_gemini_api(self, prompt: str, expected_num_topics: int, max_retries: int = 3) -> List[Dict]:
+            
+            topics.append({
+                'topic_id': topic_id,
+                'theme': theme,
+                'refined_words_en': en_words,
+                'refined_words_cn': cn_words
+            })
+        
+        return topics
+    
+    def call_gemini_api(self, prompt: str, expected_num_topics: int, max_retries: int = 3) -> Union[List[Dict], None]:
         """
-        Call Gemini API with retry logic for multiple topics
+        Call Qwen model with retry logic (renamed for compatibility)
         
         Args:
-            prompt: Input prompt containing all topics
-            max_retries: Maximum number of retries
+            prompt: Input prompt for topic refinement
+            expected_num_topics: Expected number of topics in response
+            max_retries: Maximum number of retry attempts
             
         Returns:
-            List of parsed response dictionaries for each topic
+            List of topic dictionaries or None if failed
         """
         for attempt in range(max_retries):
             try:
-                response = self.model.generate_content(prompt)
+                # Tokenize input
+                messages = [
+                    {"role": "user", "content": prompt}
+                ]
                 
-                # Extract plain text from response and parse
-                response_text = response.text
-                # Parse using the expected number of topics provided by caller
-                parsed = self._parse_plain_response(response_text, expected_num_topics=expected_num_topics)
-                if parsed:
-                    return parsed
+                text = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
+                
+                model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+                
+                # Generate response
+                with torch.no_grad():
+                    generated_ids = self.model.generate(
+                        **model_inputs,
+                        max_new_tokens=2048,
+                        temperature=0.7,
+                        do_sample=True,
+                        top_p=0.9,
+                        pad_token_id=self.tokenizer.eos_token_id
+                    )
+                
+                # Decode response
+                generated_ids = [
+                    output_ids[len(input_ids):] for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
+                ]
+                
+                response_text = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+                
+                # Parse response
+                topics = self._parse_plain_response(response_text, expected_num_topics)
+                
+                if topics and len(topics) == expected_num_topics:
+                    return topics
                 else:
-                    preview = response_text.strip().splitlines()
-                    preview_text = "\n".join(preview[:10])
-                    print("Failed to parse LLM response. First lines preview:\n" + preview_text)
-                        
-            except Exception as e:
-                print(f"API call attempt {attempt + 1} failed: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)  # Wait before retry
+                    print(f"Attempt {attempt + 1}: Got {len(topics) if topics else 0} topics, expected {expected_num_topics}")
                     
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {str(e)}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+        
         return None
     
-    def self_consistent_refinement(self,
-                                   topic_words_en: List[str],
-                                   topic_words_cn: List[str],
-                                   R: int = 3) -> List[Dict]:
+    def self_consistent_refinement(self, 
+                                  topic_words_en: List[str], 
+                                  topic_words_cn: List[str], 
+                                  R: int = 3) -> List[Dict]:
         """
-        Self-Consistent Refinement: Ask Gemini R times to refine topics, count word occurrences
-
+        Perform self-consistent refinement across multiple rounds
+        
         Args:
-            topic_words_en: List of English topic word strings (each with 15 words)
-            topic_words_cn: List of Chinese topic word strings (each with 15 words)
+            topic_words_en: List of English topic word strings (each with 15 top words)
+            topic_words_cn: List of Chinese topic word strings (each with 15 top words)
             R: Number of refinement rounds
-
+            
         Returns:
-            List of topics with word counts across refinement rounds
+            List of refined topic dictionaries with word counts
         """
         num_topics = len(topic_words_en)
+        refined_topics = []
         
         # Initialize topic data structures
-        refined_topics = []
         for k in range(num_topics):
             refined_topics.append({
                 'topic_id': k,
@@ -220,7 +257,7 @@ Focus on the most coherent and representative single words from both languages f
                 result = self.call_gemini_api(prompt, expected_num_topics=len(tw_en_batch))
 
                 if not (result and isinstance(result, list)):
-                    print(f"Round {r+1}, batch [{start}:{end}]: Failed to get valid API results")
+                    print(f"Round {r+1}, batch [{start}:{end}]: Failed to get valid model results")
                     continue
 
                 batches_processed += 1
@@ -297,140 +334,46 @@ Focus on the most coherent and representative single words from both languages f
             })
         
         return results
-    
-    def calculate_confidence_word_probabilities(self, high_confidence_topics: List[Dict]) -> List[Dict]:
-        """
-        Calculate probabilities for high confidence words from their counts
-        
-        Args:
-            high_confidence_topics: Topics with high confidence words and their counts
-            
-        Returns:
-            Topics with added probability distributions for high confidence words
-        """
-        topics_with_probs = []
-        
-        for topic_data in high_confidence_topics:
-            topic_with_probs = topic_data.copy()
-            
-            # Calculate probabilities for English high confidence words
-            en_counts = topic_data.get('word_counts_en', {})
-            en_total = sum(en_counts.values())
-            if en_total > 0:
-                topic_with_probs['word_probs_en'] = {
-                    word: count / en_total for word, count in en_counts.items()
-                }
-            else:
-                topic_with_probs['word_probs_en'] = {}
-            
-            # Calculate probabilities for Chinese high confidence words  
-            cn_counts = topic_data.get('word_counts_cn', {})
-            cn_total = sum(cn_counts.values())
-            if cn_total > 0:
-                topic_with_probs['word_probs_cn'] = {
-                    word: count / cn_total for word, count in cn_counts.items()
-                }
-            else:
-                topic_with_probs['word_probs_cn'] = {}
-                
-            topics_with_probs.append(topic_with_probs)
-            
-        return topics_with_probs
-
-    def validate_words_against_vocab(self, refined_topics: List[Dict], vocab_en: List[str], vocab_cn: List[str]) -> List[Dict]:
-        """
-        Validate refined words against actual vocabulary files and discard invalid words
-        
-        Args:
-            refined_topics: List of refined topic dictionaries
-            vocab_en: English vocabulary list from TextData
-            vocab_cn: Chinese vocabulary list from TextData
-            
-        Returns:
-            List of validated refined topics with only vocab-valid words
-        """
-        vocab_en_set = set(vocab_en)
-        vocab_cn_set = set(vocab_cn)
-        
-        validated_topics = []
-        
-        for topic_data in refined_topics:
-            topic_id = topic_data['topic_id']
-            
-            # Get refined word counts
-            word_counts_en = topic_data.get('word_counts_en', {})
-            word_counts_cn = topic_data.get('word_counts_cn', {})
-            
-            # Filter words that exist in vocabulary
-            valid_word_counts_en = {word: count for word, count in word_counts_en.items() 
-                                   if word in vocab_en_set}
-            valid_word_counts_cn = {word: count for word, count in word_counts_cn.items() 
-                                   if word in vocab_cn_set}
-            
-            # Count discarded words for logging
-            discarded_en = len(word_counts_en) - len(valid_word_counts_en)
-            discarded_cn = len(word_counts_cn) - len(valid_word_counts_cn)
-            
-            # Create validated topic data
-            validated_topic = topic_data.copy()
-            validated_topic['word_counts_en'] = valid_word_counts_en
-            validated_topic['word_counts_cn'] = valid_word_counts_cn
-            validated_topic['discarded_words_en'] = discarded_en
-            validated_topic['discarded_words_cn'] = discarded_cn
-            
-            validated_topics.append(validated_topic)
-        
-        return validated_topics
 
 
-def refine_cross_lingual_topics(topic_words_en: List[str],
-                                topic_words_cn: List[str], 
-                                topic_probas_en: torch.Tensor,
-                                topic_probas_cn: torch.Tensor,
-                                vocab_en: List[str],
-                                vocab_cn: List[str],
-                                api_key: str,
-                                R: int = 3) -> Tuple[List[Dict], List[Dict]]:
+def refine_cross_lingual_topics(topic_words_en: List[str], 
+                               topic_words_cn: List[str], 
+                               topic_probas_en: torch.Tensor,
+                               topic_probas_cn: torch.Tensor,
+                               vocab_en: List[str],
+                               vocab_cn: List[str],
+                               api_key: str = None,
+                               R: int = 3) -> Tuple[List[Dict], List[Dict]]:
     """
-    Main function to perform cross-lingual topic refinement for all topics at once
-
-    Mathematical Framework:
-    1. Process all topics simultaneously in each refinement round
-    2. Self-consistent refinement: Refine top 15 words by removing irrelevant and adding relevant words, repeat R times
-    3. Vocabulary validation: Discard refined words not in actual vocabulary files
-    4. Frequency-based confidence: Aggregate across rounds for each topic
-
+    Main function to refine cross-lingual topics using local Qwen model
+    
     Args:
-        topic_words_en: English topic words (each with top 15 words)
-        topic_words_cn: Chinese topic words (each with top 15 words)
-        topic_probas_en: English topic probabilities [num_topics, 15] (top 15 words)
-        topic_probas_cn: Chinese topic probabilities [num_topics, 15] (top 15 words)
-        vocab_en: English vocabulary list from TextData
-        vocab_cn: Chinese vocabulary list from TextData
-        api_key: Gemini API key
-        R: Number of refinement rounds to
-
+        topic_words_en: List of English topic word strings
+        topic_words_cn: List of Chinese topic word strings  
+        topic_probas_en: English topic probability tensor
+        topic_probas_cn: Chinese topic probability tensor
+        vocab_en: English vocabulary
+        vocab_cn: Chinese vocabulary
+        api_key: Ignored (no API key needed for local model)
+        R: Number of refinement rounds
+        
     Returns:
         Tuple of (refined_topics, high_confidence_topics)
     """
-    refiner = CrossLingualTopicRefiner(api_key)
+    # Initialize refiner with local Qwen model (no API key needed)
+    refiner = CrossLingualTopicRefiner(api_key=api_key)
     
-    print(f"Starting batch refinement for {len(topic_words_en)} topics with {R} rounds each...")
-    
-    # Process all topics together in each refinement round
-    refined_topics = refiner.self_consistent_refinement(topic_words_en, topic_words_cn, R=R)
-    
-    # Validate refined words against actual vocabulary
-    print("Validating refined words against vocabulary...")
-    validated_topics = refiner.validate_words_against_vocab(refined_topics, vocab_en, vocab_cn)
-    
-    # Extract high-confidence words based on frequency from validated topics
-    high_confidence_topics = refiner.get_high_confidence_words(
-        validated_topics, top_k=15
+    # Perform self-consistent refinement
+    refined_topics = refiner.self_consistent_refinement(
+        topic_words_en=topic_words_en,
+        topic_words_cn=topic_words_cn,
+        R=R
     )
     
-    # Calculate probabilities for high confidence words
-    print("Calculating probabilities for high confidence words...")
-    high_confidence_topics_with_probs = refiner.calculate_confidence_word_probabilities(high_confidence_topics)
+    # Get high confidence words
+    high_confidence_topics = refiner.get_high_confidence_words(
+        refined_topics, 
+        top_k=15
+    )
     
-    return validated_topics, high_confidence_topics_with_probs
+    return refined_topics, high_confidence_topics
