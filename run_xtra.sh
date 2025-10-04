@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export GEMINI_API_KEY="AIzaSyChZORbInGe2e42yOEL8B8AWXP0ldTxCLk"
+export GEMINI_API_KEY="AIzaSyAqxJmQQuumBKsD9nwWfALuOD5wnM6rU4I"
 
 echo "Running XTRA model on all datasets..."
 

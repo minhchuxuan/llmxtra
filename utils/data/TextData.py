@@ -30,11 +30,16 @@ class BilingualTextDataset(Dataset):
         return_dict = {
             'bow_en': self.bow_en[en_idx],
             'bow_cn': self.bow_cn[cn_idx],
-            'doc_embedding_en': self.doc_embeddings_en[en_idx] if self.doc_embeddings_en is not None else None,
-            'doc_embedding_cn': self.doc_embeddings_cn[cn_idx] if self.doc_embeddings_cn is not None else None,
-            'cluster_en': self.clusterinfo_en[en_idx] if self.clusterinfo_en is not None else None,
-            'cluster_cn': self.clusterinfo_cn[cn_idx] if self.clusterinfo_cn is not None else None,
         }
+        # Only add keys if the data exists
+        if self.doc_embeddings_en is not None:
+            return_dict['doc_embedding_en'] = self.doc_embeddings_en[en_idx]
+        if self.doc_embeddings_cn is not None:
+            return_dict['doc_embedding_cn'] = self.doc_embeddings_cn[cn_idx]
+        if self.clusterinfo_en is not None:
+            return_dict['cluster_en'] = self.clusterinfo_en[en_idx]
+        if self.clusterinfo_cn is not None:
+            return_dict['cluster_cn'] = self.clusterinfo_cn[cn_idx]
 
         return return_dict
 
