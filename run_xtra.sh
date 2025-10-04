@@ -1,5 +1,7 @@
 #!/bin/bash
 
+export GEMINI_API_KEY="AIzaSyChZORbInGe2e42yOEL8B8AWXP0ldTxCLk"
+
 echo "Running XTRA model on all datasets..."
 
 # XTRA on Amazon_Review
@@ -15,5 +17,3 @@ echo "=== Running XTRA on Rakuten_Amazon ==="
 python main.py --model XTRA --seed 7 --dataset Rakuten_Amazon --device 0 --gemini_api_key $GEMINI_API_KEY
 
 echo "XTRA experiments completed!"
-
-

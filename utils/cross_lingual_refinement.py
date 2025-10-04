@@ -79,8 +79,6 @@ Rules:
 - List topics in order from 0 to {num_topics - 1}
 - Do not include any extra commentary or formatting
 
-
-
 Focus on the most coherent and representative single words from both languages for each topic.
 """
         return prompt
@@ -205,35 +203,53 @@ Focus on the most coherent and representative single words from both languages f
         
         print(f"Starting refinement for {num_topics} topics with {R} rounds...")
         
-        # Perform R refinement rounds
+        # Perform R refinement rounds (process topics in 2 batches per round)
         for r in range(R):
-            prompt = self.create_refinement_prompt(topic_words_en, topic_words_cn)
-            result = self.call_gemini_api(prompt, expected_num_topics=num_topics)
-            
-            if not (result and isinstance(result, list)):
-                print(f"Round {r+1}: Failed to get valid API results")
-                continue
-                
-            # Process refinement results
-            for topic_result in result:
-                if not self._is_valid_topic_result(topic_result, num_topics):
+            mid = (num_topics + 1) // 2
+            batch_ranges = [(0, mid), (mid, num_topics)]
+            batches_processed = 0
+
+            for start, end in batch_ranges:
+                if start >= end:
                     continue
-                    
-                topic_id = topic_result['topic_id']
-                topic_data = refined_topics[topic_id]
-                
-                # Update word counts for both languages
-                self._update_word_counts(
-                    topic_data['word_counts_en'], 
-                    topic_result.get('refined_words_en', [])
-                )
-                self._update_word_counts(
-                    topic_data['word_counts_cn'], 
-                    topic_result.get('refined_words_cn', [])
-                )
-                
-                # Track completed rounds
-                topic_data['refinement_rounds_completed'] += 1
+                # Slice topics for this batch
+                tw_en_batch = topic_words_en[start:end]
+                tw_cn_batch = topic_words_cn[start:end]
+
+                prompt = self.create_refinement_prompt(tw_en_batch, tw_cn_batch)
+                result = self.call_gemini_api(prompt, expected_num_topics=len(tw_en_batch))
+
+                if not (result and isinstance(result, list)):
+                    print(f"Round {r+1}, batch [{start}:{end}]: Failed to get valid API results")
+                    continue
+
+                batches_processed += 1
+
+                # Process refinement results for this batch (remap local ids to global ids)
+                for topic_result in result:
+                    local_tid = topic_result.get('topic_id')
+                    if local_tid is None:
+                        continue
+                    global_tid = start + int(local_tid)
+                    if not (0 <= global_tid < num_topics):
+                        continue
+
+                    topic_data = refined_topics[global_tid]
+
+                    # Update word counts for both languages
+                    self._update_word_counts(
+                        topic_data['word_counts_en'], 
+                        topic_result.get('refined_words_en', [])
+                    )
+                    self._update_word_counts(
+                        topic_data['word_counts_cn'], 
+                        topic_result.get('refined_words_cn', [])
+                    )
+
+                    # Track completed rounds per topic
+                    topic_data['refinement_rounds_completed'] += 1
+
+            print(f"Completed refinement round {r+1}/{R} (batches processed: {batches_processed}/2)")
         
         return refined_topics
     
