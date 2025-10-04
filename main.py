@@ -27,16 +27,16 @@ def parse_args():
 
     parser.add_argument('--device', type=int, default=0, help='CUDA device index to use')
     parser.add_argument('--warmStep', default=0, type=int)
-    parser.add_argument('--llm_step', type=int, default=30)  # the number of epochs for llm refine
+    parser.add_argument('--llm_step', type=int, default=50)  # the number of epochs for llm refine
     parser.add_argument('--gemini_api_key', type=str, default=None,
                         help='Google Gemini API key for cross-lingual topic refinement')
     parser.add_argument('--refinement_rounds', type=int, default=5,
                         help='Number of self-consistent refinement rounds (R)')
-    parser.add_argument('--refine_frequency', type=int, default=8,
+    parser.add_argument('--refine_frequency', type=int, default=10,
                         help='Frequency of refinement during training (every N epochs after warmStep)')
     parser.add_argument('--refine_weight', type=float, default=20000,
                         help='Weight for refinement loss (0 disables refinement loss)')
-    parser.add_argument('--topic_sim_weight', type=float, default=400,
+    parser.add_argument('--topic_sim_weight', type=float, default=100,
                         help='Weight for topic embedding similarity loss (0 disables topic similarity loss)')
 
 
@@ -299,7 +299,7 @@ def main():
 
 
 
-    print("\n================= Classification =================")
+    print("\n================= Classification (Real Theta) =================")
     cls_results = crosslingual_cls(
         train_theta_en, train_theta_cn,
         test_theta_en, test_theta_cn,
@@ -311,6 +311,21 @@ def main():
     wandb.log({"intra_cn": cls_results["intra_cn"]})
     wandb.log({"cross_en": cls_results["cross_en"]})
     wandb.log({"cross_cn": cls_results["cross_cn"]})
+    
+    print("\n================= Classification (Sim Probs) =================")
+    # Classification using sim_probs (cosine similarity + softmax)
+    cls_results_sim = crosslingual_cls_with_sim_probs(
+        runner,  # Pass runner object to access topic_embeddings
+        dataset_handler.train_loader, dataset_handler.test_loader,
+        train_labels_en, train_labels_cn,
+        test_labels_en, test_labels_cn,
+        temperature=0.2
+    )
+    print_results(cls_results_sim)
+    wandb.log({"intra_en_sim": cls_results_sim["intra_en"]})
+    wandb.log({"intra_cn_sim": cls_results_sim["intra_cn"]})
+    wandb.log({"cross_en_sim": cls_results_sim["cross_en"]})
+    wandb.log({"cross_cn_sim": cls_results_sim["cross_cn"]})
 
 
 

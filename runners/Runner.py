@@ -127,6 +127,12 @@ class Runner:
                 if epoch == self.args.warmStep:
                     should_refine = True
                     print("🔄 First refinement after warmStep...")
+                    
+                    # Reset learning rate for Phase 2
+                    phase2_lr = self.args.learning_rate * 0.3  # 30% of original LR
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = phase2_lr
+                    print(f"📈 Reset learning rate to {phase2_lr:.6f} for Phase 2 (refinement phase)")
                 # Subsequent refinements at regular intervals
                 elif (epoch > self.args.warmStep and 
                       (epoch - self.args.warmStep) % refine_frequency == 0):

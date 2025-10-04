@@ -68,6 +68,118 @@ def crosslingual_cls(train_theta_en, train_theta_cn,
     return results
 
 
+def crosslingual_cls_with_sim_probs(runner, train_loader, test_loader,
+                                   train_labels_en, train_labels_cn,
+                                   test_labels_en, test_labels_cn,
+                                   temperature=0.2):
+    """
+    Classification using sim_probs (softmax of cosine similarity) as theta predict
+    
+    Args:
+        runner: Runner object containing model and topic_embeddings
+        train_loader: Training data loader
+        test_loader: Test data loader  
+        train_labels_en, train_labels_cn: Training labels
+        test_labels_en, test_labels_cn: Test labels
+        temperature: Temperature for softmax
+    
+    Returns:
+        Dictionary with classification results using sim_probs
+    """
+    import torch.nn.functional as F
+    
+    # Check if topic embeddings exist
+    if not hasattr(runner, 'topic_embeddings') or runner.topic_embeddings is None:
+        print("Warning: No topic embeddings found. Skipping sim_probs classification.")
+        return {
+            'intra_en': {'acc': 0.0, 'macro-F1': 0.0},
+            'intra_cn': {'acc': 0.0, 'macro-F1': 0.0},
+            'cross_en': {'acc': 0.0, 'macro-F1': 0.0},
+            'cross_cn': {'acc': 0.0, 'macro-F1': 0.0}
+        }
+    
+    # Get topic embeddings from runner
+    topic_embeddings = runner.topic_embeddings  # [num_topics, embedding_dim]
+    model = runner.model
+    
+    # Get sim_probs for training data
+    train_sim_probs_en = []
+    train_sim_probs_cn = []
+    
+    # Get sim_probs for test data  
+    test_sim_probs_en = []
+    test_sim_probs_cn = []
+    
+    model.eval()
+    device = next(model.parameters()).device
+    
+    with torch.no_grad():
+        # Training data
+        for batch_data in train_loader:
+            doc_emb_en = batch_data.get('doc_embedding_en')
+            doc_emb_cn = batch_data.get('doc_embedding_cn')
+            
+            if doc_emb_en is not None:
+                doc_emb_en = doc_emb_en.to(device)
+                doc_emb_en_norm = F.normalize(doc_emb_en, p=2, dim=1)
+                topic_emb_norm = F.normalize(topic_embeddings, p=2, dim=1)
+                sim_en = torch.matmul(doc_emb_en_norm, topic_emb_norm.T)
+                sim_probs_en = F.softmax(sim_en / temperature, dim=1)
+                train_sim_probs_en.append(sim_probs_en.cpu().numpy())
+                
+            if doc_emb_cn is not None:
+                doc_emb_cn = doc_emb_cn.to(device)
+                doc_emb_cn_norm = F.normalize(doc_emb_cn, p=2, dim=1)
+                topic_emb_norm = F.normalize(topic_embeddings, p=2, dim=1)
+                sim_cn = torch.matmul(doc_emb_cn_norm, topic_emb_norm.T)
+                sim_probs_cn = F.softmax(sim_cn / temperature, dim=1)
+                train_sim_probs_cn.append(sim_probs_cn.cpu().numpy())
+        
+        # Test data
+        for batch_data in test_loader:
+            doc_emb_en = batch_data.get('doc_embedding_en')
+            doc_emb_cn = batch_data.get('doc_embedding_cn')
+            
+            if doc_emb_en is not None:
+                doc_emb_en = doc_emb_en.to(device)
+                doc_emb_en_norm = F.normalize(doc_emb_en, p=2, dim=1)
+                topic_emb_norm = F.normalize(topic_embeddings, p=2, dim=1)
+                sim_en = torch.matmul(doc_emb_en_norm, topic_emb_norm.T)
+                sim_probs_en = F.softmax(sim_en / temperature, dim=1)
+                test_sim_probs_en.append(sim_probs_en.cpu().numpy())
+                
+            if doc_emb_cn is not None:
+                doc_emb_cn = doc_emb_cn.to(device)
+                doc_emb_cn_norm = F.normalize(doc_emb_cn, p=2, dim=1)
+                topic_emb_norm = F.normalize(topic_embeddings, p=2, dim=1)
+                sim_cn = torch.matmul(doc_emb_cn_norm, topic_emb_norm.T)
+                sim_probs_cn = F.softmax(sim_cn / temperature, dim=1)
+                test_sim_probs_cn.append(sim_probs_cn.cpu().numpy())
+    
+    # Concatenate all batches
+    if train_sim_probs_en:
+        train_sim_probs_en = np.concatenate(train_sim_probs_en, axis=0)
+    if train_sim_probs_cn:
+        train_sim_probs_cn = np.concatenate(train_sim_probs_cn, axis=0)
+    if test_sim_probs_en:
+        test_sim_probs_en = np.concatenate(test_sim_probs_en, axis=0)
+    if test_sim_probs_cn:
+        test_sim_probs_cn = np.concatenate(test_sim_probs_cn, axis=0)
+    
+    print(f"Train sim_probs shapes: EN {train_sim_probs_en.shape if train_sim_probs_en else 'None'}, CN {train_sim_probs_cn.shape if train_sim_probs_cn else 'None'}")
+    print(f"Test sim_probs shapes: EN {test_sim_probs_en.shape if test_sim_probs_en else 'None'}, CN {test_sim_probs_cn.shape if test_sim_probs_cn else 'None'}")
+    
+    # Classification using sim_probs
+    results = crosslingual_cls(
+        train_sim_probs_en, train_sim_probs_cn,
+        test_sim_probs_en, test_sim_probs_cn,
+        train_labels_en, train_labels_cn,
+        test_labels_en, test_labels_cn
+    )
+    
+    return results
+
+
 def print_results(results):
     """
     Print classification results in a formatted way.

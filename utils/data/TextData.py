@@ -63,9 +63,15 @@ class DatasetHandler:
         self.vocab_size_en = len(self.vocab_en)
         self.vocab_size_cn = len(self.vocab_cn)
 
-        # Load document embeddings (train)
+        # Load document embeddings (train and test)
         self.doc_embeddings_en = np.load(os.path.join(data_dir, f'doc_embeddings_{lang1}_train.npy'))
         self.doc_embeddings_cn = np.load(os.path.join(data_dir, f'doc_embeddings_{lang2}_train.npy'))
+        
+        # Load test document embeddings
+        test_doc_emb_path_en = os.path.join(data_dir, f'doc_embeddings_{lang1}_test.npy')
+        test_doc_emb_path_cn = os.path.join(data_dir, f'doc_embeddings_{lang2}_test.npy')
+        self.test_doc_embeddings_en = np.load(test_doc_emb_path_en) if os.path.exists(test_doc_emb_path_en) else None
+        self.test_doc_embeddings_cn = np.load(test_doc_emb_path_cn) if os.path.exists(test_doc_emb_path_cn) else None
 
         # Load word embeddings (optional, used by topic similarity loss)
         we_en_path = os.path.join(data_dir, f'word_embeddings_{lang1}.npy')
@@ -151,6 +157,11 @@ class DatasetHandler:
         # Move commonly used arrays to device; keep others on CPU if None
         self.doc_embeddings_en = self.move_to_cuda(self.doc_embeddings_en)
         self.doc_embeddings_cn = self.move_to_cuda(self.doc_embeddings_cn)
+        if self.test_doc_embeddings_en is not None:
+            self.test_doc_embeddings_en = self.move_to_cuda(self.test_doc_embeddings_en)
+        if self.test_doc_embeddings_cn is not None:
+            self.test_doc_embeddings_cn = self.move_to_cuda(self.test_doc_embeddings_cn)
+        
         self.train_bow_matrix_en = self.move_to_cuda(self.train_bow_matrix_en)
         self.test_bow_matrix_en = self.move_to_cuda(self.test_bow_matrix_en)
         self.train_bow_matrix_cn = self.move_to_cuda(self.train_bow_matrix_cn)
@@ -172,7 +183,9 @@ class DatasetHandler:
         )
         self.test_loader = DataLoader(
             BilingualTextDataset(
-                self.test_bow_matrix_en, self.test_bow_matrix_cn
+                self.test_bow_matrix_en, self.test_bow_matrix_cn,
+                self.test_doc_embeddings_en, self.test_doc_embeddings_cn,
+                None, None  # No cluster info for test data
             ),
             batch_size=batch_size,
             shuffle=False
