@@ -30,12 +30,17 @@ class BilingualTextDataset(Dataset):
         return_dict = {
             'bow_en': self.bow_en[en_idx],
             'bow_cn': self.bow_cn[cn_idx],
-            'doc_embedding_en': self.doc_embeddings_en[en_idx] if self.doc_embeddings_en is not None else None,
-            'doc_embedding_cn': self.doc_embeddings_cn[cn_idx] if self.doc_embeddings_cn is not None else None,
-            'cluster_en': self.clusterinfo_en[en_idx] if self.clusterinfo_en is not None else None,
-            'cluster_cn': self.clusterinfo_cn[cn_idx] if self.clusterinfo_cn is not None else None,
         }
-
+        
+        if self.doc_embeddings_en is not None:
+            return_dict['doc_embedding_en'] = self.doc_embeddings_en[en_idx]
+        if self.doc_embeddings_cn is not None:
+            return_dict['doc_embedding_cn'] = self.doc_embeddings_cn[cn_idx]
+        if self.clusterinfo_en is not None:
+            return_dict['cluster_en'] = self.clusterinfo_en[en_idx]
+        if self.clusterinfo_cn is not None:
+            return_dict['cluster_cn'] = self.clusterinfo_cn[cn_idx]
+        
         return return_dict
 
 
@@ -62,6 +67,9 @@ class DatasetHandler:
         self.train_size_cn = len(self.train_texts_cn)
         self.vocab_size_en = len(self.vocab_en)
         self.vocab_size_cn = len(self.vocab_cn)
+
+        # Convert BoW matrices to dense numpy arrays for PyTorch compatibility
+        # Keep as 2D arrays, will be converted to tensors later
 
         # Load document embeddings (train and test)
         self.doc_embeddings_en = np.load(os.path.join(data_dir, f'doc_embeddings_{lang1}_train.npy'))
@@ -98,11 +106,8 @@ class DatasetHandler:
             (self.trans_dict,
              self.trans_matrix_en,
              self.trans_matrix_cn) = self.parse_dictionary(dict_path)
-            try:
-                self.pretrained_WE_en = scipy.sparse.load_npz(os.path.join(data_dir, f'word2vec_{lang1}.npz')).toarray()
-                self.pretrained_WE_cn = scipy.sparse.load_npz(os.path.join(data_dir, f'word2vec_{lang2}.npz')).toarray()
-            except Exception:
-                self.pretrained_WE_en, self.pretrained_WE_cn = None, None
+            self.pretrained_WE_en = scipy.sparse.load_npz(os.path.join(data_dir, f'word2vec_{lang1}.npz')).toarray()
+            self.pretrained_WE_cn = scipy.sparse.load_npz(os.path.join(data_dir, f'word2vec_{lang2}.npz')).toarray()
         elif model_name == 'NMTM':
             # Load translation dictionary and compute Maps
             if lang2 == "ja":

@@ -5,81 +5,170 @@ from collections import Counter, defaultdict
 import re
 import time
 from typing import List, Dict, Tuple, Union
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from openai import OpenAI
 
+def process_single_topic_task(topic_idx: int, worker_id: int, prompt: str, api_key: str, model_name: str, original_words_en: str = "", original_words_cn: str = "") -> Dict:
+    """
+    Standalone helper function to run in a separate process.
+    Configures the OpenAI client locally for this process.
+    """
+    import time
+    from openai import OpenAI
+    
+    # Configure OpenAI client for this process
+    client = OpenAI(
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=api_key
+    )
+    
+    # Log the topic being processed with its content
+    print(f"Worker {worker_id} processing Topic {topic_idx}: EN={original_words_en[:50]}... CN={original_words_cn[:50]}...")
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                top_p=0.7,
+                max_tokens=1024,
+            )
+            response_text = response.choices[0].message.content
+            
+            # Simple parsing logic duplicated here to avoid dependency on class instance
+            lines = [ln.strip() for ln in response_text.splitlines() if ln.strip()]
+            parsed_topic = None
+            
+            # We expect exactly one topic in the output
+            i = 0
+            while i < len(lines):
+                m = re.match(r"^Topic\s+(\d+)\s*:\s*(.*)$", lines[i])
+                if m:
+                    tid = int(m.group(1))
+                    theme = m.group(2).strip()
+                    en_words = []
+                    cn_words = []
+                    if i + 1 < len(lines) and lines[i+1].startswith("EN:"):
+                        en_line = lines[i+1][3:].strip()
+                        if ' - ' in en_line:
+                            en_words = [w.strip() for w in en_line.split(' - ') if w.strip()]
+                        else:
+                            en_words = [w.strip() for w in en_line.split(',') if w.strip()]
+                    if i + 2 < len(lines) and lines[i+2].startswith("CN:"):
+                        cn_line = lines[i+2][3:].strip()
+                        if ' - ' in cn_line:
+                            cn_words = [w.strip() for w in cn_line.split(' - ') if w.strip()]
+                        else:
+                            cn_words = [w.strip() for w in cn_line.split(',') if w.strip()]
+                    
+                    if en_words and cn_words:
+                        parsed_topic = {
+                            'topic_id': tid,
+                            'topic_theme': theme,
+                            'refined_words_en': en_words,
+                            'refined_words_cn': cn_words
+                        }
+                        break # Found it
+                    i += 3
+                else:
+                    i += 1
+            
+            if parsed_topic:
+                # Ensure ID matches what we requested, or force it if it's the only one
+                if parsed_topic['topic_id'] == topic_idx:
+                    return parsed_topic
+                else:
+                    # If ID mismatch but valid content, trust the content and fix ID
+                    parsed_topic['topic_id'] = topic_idx
+                    return parsed_topic
+            
+            # If parsing failed but we got text, maybe retry?
+            # print(f"Worker {worker_id}: Failed to parse response for topic {topic_idx}")
+            
+        except Exception as e:
+            # print(f"Worker {worker_id}: Error refining topic {topic_idx}: {e}")
+            time.sleep(1 + attempt)
+            
+    return None
 
 class CrossLingualTopicRefiner:
-    def __init__(self, api_key: str, model_name: str = "gemini-2.5-flash"):
+    def __init__(self, api_keys: List[str], model_name: str = "qwen/qwen3-coder-480b-a35b-instruct"):
         """
-        Initialize the cross-lingual topic refiner with Gemini API
+        Initialize the cross-lingual topic refiner with OpenAI compatible API (NVIDIA)
         
         Args:
-            api_key: Google Gemini API key
-            model_name: Gemini model name to use
+            api_keys: List of API keys
+            model_name: Model name to use
         """
-    
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
-    
-    def create_refinement_prompt(self, topic_words_en: List[str], topic_words_cn: List[str]) -> str:
+        self.api_keys = api_keys
+        self.model_name = model_name
+        
+    def _get_model(self, index: int):
         """
-        Create prompt for refining all topics at once
+        Get a model instance for a specific index (round-robin)
+        """
+        # Not used in parallel flow, but kept for compatibility
+        return None
 
+    
+    def create_single_topic_refinement_prompt(self, target_topic_idx: int, topic_words_en: List[str], topic_words_cn: List[str]) -> str:
+        """
+        Create prompt for refining a SINGLE specific topic, while providing all other topics as context.
+        
         Args:
-            topic_words_en: List of English topic word strings (each with 15 top words)
-            topic_words_cn: List of Chinese topic word strings (each with 15 top words)
-
+            target_topic_idx: Index of the topic to refine
+            topic_words_en: List of English topic word strings for ALL topics
+            topic_words_cn: List of Chinese topic word strings for ALL topics
+            
         Returns:
-            Formatted prompt string for all topics
+            Formatted prompt string
         """
         num_topics = len(topic_words_en)
-
-        prompt = f"""Given the following cross-lingual topic words from English and Chinese for {num_topics} topics, please refine and improve each topic by:
-
-1. For each topic, we provide the top 15 most probable words from each language.
-2. Identify the main theme that connects these words across both languages for each topic
-3. Remove any irrelevant or noisy words that don't fit the coherent theme
-4. Add relevant words that strengthen the topic coherence and cross-lingual representation
-5. Across ALL topics, do not reuse any word. If a word could fit multiple topics, assign it to the single best topic and replace it elsewhere.
-6. For each topic, prioritize words that are specific to the theme and avoid words already used in other topics.
-7. Return exactly 20 words per language for each refined topic
-
-IMPORTANT: Use only SINGLE WORDS, not compound words or phrases. Each word should be a standalone term.
-Examples: 
-- Good: "economy", "business", "market", "trade"
-- Bad: "business_model", "stock_market", "trade-off", "economic policy"
-
-"""
-
-        # Add all topics to the prompt
+        
+        # Construct context of all topics
+        all_topics_context = ""
         for k in range(num_topics):
             top_15_en = topic_words_en[k].split()
             top_15_cn = topic_words_cn[k].split()
-
             words_en_str = ", ".join(top_15_en)
             words_cn_str = ", ".join(top_15_cn)
+            
+            marker = " (TARGET TOPIC)" if k == target_topic_idx else ""
+            all_topics_context += f"Topic {k}{marker}:\nEN: {words_en_str}\nCN: {words_cn_str}\n\n"
 
-            prompt += f"""
-Topic {k}:
-English top 15 words: {words_en_str}
-Chinese top 15 words: {words_cn_str}
-"""
+        prompt = f"""You are an expert in cross-lingual topic modeling. We have extracted {num_topics} topics from a bilingual corpus (English and Chinese).
+Your task is to REFINE ONLY ONE specific topic (Topic {target_topic_idx}), ensuring it is coherent, distinct, and high-quality.
 
-        prompt += f"""
+Here is the list of all {num_topics} topics for context (to avoid overlap):
+{all_topics_context}
 
-Please provide your response in a SIMPLE plain-text format (no JSON, no code block) for ALL {num_topics} topics, exactly as follows per topic:
+----------------------------------------------------------------
+YOUR TASK: REFINE TOPIC {target_topic_idx}
+----------------------------------------------------------------
 
-Topic <id>: <brief theme>
+Original Top Words for Topic {target_topic_idx}:
+EN: {topic_words_en[target_topic_idx]}
+CN: {topic_words_cn[target_topic_idx]}
+
+Instructions:
+1. Identify the core semantic theme of Topic {target_topic_idx}.
+2. Select the best 20 single words for English and 20 single words for Chinese that represent this theme.
+3. Remove noise (irrelevant words) and generic words.
+4. Ensure DISTINCTIVENESS: Do not use words that clearly belong to other topics listed in the context.
+5. Output format must be strict plain text.
+
+Output Format:
+Topic {target_topic_idx}: <Short Theme Description>
 EN: word1 - word2 - ... - word20
 CN: word1 - word2 - ... - word20
 
 Rules:
-- Only use single words (no compound words, phrases, or underscores)
-- Exactly 20 words after EN: and exactly 20 words after CN:
-- Separate words with a hyphen surrounded by single spaces (e.g., "word1 - word2")
-- List topics in order from 0 to {num_topics - 1}
-- Do not include any extra commentary or formatting
-
-Focus on the most coherent and representative single words from both languages for each topic.
+- Use ONLY single words (no phrases).
+- Exactly 20 words per language.
+- Separated by " - ".
+- Do not output anything else.
 """
         return prompt
     
@@ -141,53 +230,20 @@ Focus on the most coherent and representative single words from both languages f
                 ok = False
         return ok
 
-    def call_gemini_api(self, prompt: str, expected_num_topics: int, max_retries: int = 3) -> List[Dict]:
+    def call_gemini_api_single_topic(self, prompt: str, topic_idx: int, worker_id: int, max_retries: int = 3) -> Dict:
         """
-        Call Gemini API with retry logic for multiple topics
-        
-        Args:
-            prompt: Input prompt containing all topics
-            max_retries: Maximum number of retries
-            
-        Returns:
-            List of parsed response dictionaries for each topic
+        Call Gemini API for a single topic with retry logic.
+        This method is kept for compatibility or sequential testing but is superseded by process_single_topic_task.
         """
-        for attempt in range(max_retries):
-            try:
-                response = self.model.generate_content(prompt)
-                
-                # Extract plain text from response and parse
-                response_text = response.text
-                # Parse using the expected number of topics provided by caller
-                parsed = self._parse_plain_response(response_text, expected_num_topics=expected_num_topics)
-                if parsed:
-                    return parsed
-                else:
-                    preview = response_text.strip().splitlines()
-                    preview_text = "\n".join(preview[:10])
-                    print("Failed to parse LLM response. First lines preview:\n" + preview_text)
-                        
-            except Exception as e:
-                print(f"API call attempt {attempt + 1} failed: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(1)  # Wait before retry
-                    
-        return None
+        # This method is no longer used in the parallel flow but kept for reference
+        pass
     
     def self_consistent_refinement(self,
                                    topic_words_en: List[str],
                                    topic_words_cn: List[str],
                                    R: int = 3) -> List[Dict]:
         """
-        Self-Consistent Refinement: Ask Gemini R times to refine topics, count word occurrences
-
-        Args:
-            topic_words_en: List of English topic word strings (each with 15 words)
-            topic_words_cn: List of Chinese topic word strings (each with 15 words)
-            R: Number of refinement rounds
-
-        Returns:
-            List of topics with word counts across refinement rounds
+        Self-Consistent Refinement: Ask Gemini R times to refine topics in PARALLEL using ProcessPoolExecutor
         """
         num_topics = len(topic_words_en)
         
@@ -201,57 +257,53 @@ Focus on the most coherent and representative single words from both languages f
                 'refinement_rounds_completed': 0
             })
         
-        print(f"Starting refinement for {num_topics} topics with {R} rounds...")
+        print(f"Starting PARALLEL refinement for {num_topics} topics with {R} rounds using ProcessPoolExecutor...")
         
-        # Perform R refinement rounds (process topics in 2 batches per round)
+        # Max workers based on user request (50) or number of keys
+        # User asked for 50 processes.
+        max_workers = 50 
+        
         for r in range(R):
-            mid = (num_topics + 1) // 2
-            batch_ranges = [(0, mid), (mid, num_topics)]
-            batches_processed = 0
-
-            for start, end in batch_ranges:
-                if start >= end:
-                    continue
-                # Slice topics for this batch
-                tw_en_batch = topic_words_en[start:end]
-                tw_cn_batch = topic_words_cn[start:end]
-
-                prompt = self.create_refinement_prompt(tw_en_batch, tw_cn_batch)
-                result = self.call_gemini_api(prompt, expected_num_topics=len(tw_en_batch))
-
-                if not (result and isinstance(result, list)):
-                    print(f"Round {r+1}, batch [{start}:{end}]: Failed to get valid API results")
-                    continue
-
-                batches_processed += 1
-
-                # Process refinement results for this batch (remap local ids to global ids)
-                for topic_result in result:
-                    local_tid = topic_result.get('topic_id')
-                    if local_tid is None:
-                        continue
-                    global_tid = start + int(local_tid)
-                    if not (0 <= global_tid < num_topics):
-                        continue
-
-                    topic_data = refined_topics[global_tid]
-
-                    # Update word counts for both languages
-                    self._update_word_counts(
-                        topic_data['word_counts_en'], 
-                        topic_result.get('refined_words_en', [])
+            print(f"--- Round {r+1}/{R} ---")
+            # Use ProcessPoolExecutor for true parallelism and API key isolation
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                future_to_topic = {}
+                for k in range(num_topics):
+                    prompt = self.create_single_topic_refinement_prompt(k, topic_words_en, topic_words_cn)
+                    worker_id = k
+                    # Pick key for this task
+                    api_key = self.api_keys[worker_id % len(self.api_keys)]
+                    
+                    future = executor.submit(
+                        process_single_topic_task, 
+                        topic_idx=k, 
+                        worker_id=worker_id, 
+                        prompt=prompt, 
+                        api_key=api_key, 
+                        model_name=self.model_name,
+                        original_words_en=topic_words_en[k],
+                        original_words_cn=topic_words_cn[k]
                     )
-                    self._update_word_counts(
-                        topic_data['word_counts_cn'], 
-                        topic_result.get('refined_words_cn', [])
-                    )
+                    future_to_topic[future] = k
 
-                    # Track completed rounds per topic
-                    topic_data['refinement_rounds_completed'] += 1
+                for future in as_completed(future_to_topic):
+                    k = future_to_topic[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            topic_data = refined_topics[k]
+                            self._update_word_counts(topic_data['word_counts_en'], result.get('refined_words_en', []))
+                            self._update_word_counts(topic_data['word_counts_cn'], result.get('refined_words_cn', []))
+                            topic_data['refinement_rounds_completed'] += 1
+                            # print(f"  Topic {k} refined.")
+                        else:
+                            print(f"  Topic {k} failed to refine.")
+                    except Exception as exc:
+                        print(f"  Topic {k} generated an exception: {exc}")
 
-            print(f"Completed refinement round {r+1}/{R} (batches processed: {batches_processed}/2)")
-        
         return refined_topics
+
+    # _process_single_topic method removed as we use standalone function
     
     def _is_valid_topic_result(self, topic_result: Dict, num_topics: int) -> bool:
         """Validate topic result structure"""
@@ -389,31 +441,18 @@ def refine_cross_lingual_topics(topic_words_en: List[str],
                                 topic_probas_cn: torch.Tensor,
                                 vocab_en: List[str],
                                 vocab_cn: List[str],
-                                api_key: str,
+                                api_key: Union[str, List[str]],
                                 R: int = 3) -> Tuple[List[Dict], List[Dict]]:
     """
-    Main function to perform cross-lingual topic refinement for all topics at once
-
-    Mathematical Framework:
-    1. Process all topics simultaneously in each refinement round
-    2. Self-consistent refinement: Refine top 15 words by removing irrelevant and adding relevant words, repeat R times
-    3. Vocabulary validation: Discard refined words not in actual vocabulary files
-    4. Frequency-based confidence: Aggregate across rounds for each topic
-
-    Args:
-        topic_words_en: English topic words (each with top 15 words)
-        topic_words_cn: Chinese topic words (each with top 15 words)
-        topic_probas_en: English topic probabilities [num_topics, 15] (top 15 words)
-        topic_probas_cn: Chinese topic probabilities [num_topics, 15] (top 15 words)
-        vocab_en: English vocabulary list from TextData
-        vocab_cn: Chinese vocabulary list from TextData
-        api_key: Gemini API key
-        R: Number of refinement rounds to
-
-    Returns:
-        Tuple of (refined_topics, high_confidence_topics)
+    Main function to perform cross-lingual topic refinement
     """
-    refiner = CrossLingualTopicRefiner(api_key)
+    # Handle single or multiple API keys
+    if isinstance(api_key, str):
+        api_keys = [k.strip() for k in api_key.split(',') if k.strip()]
+    else:
+        api_keys = api_key
+        
+    refiner = CrossLingualTopicRefiner(api_keys)
     
     print(f"Starting batch refinement for {len(topic_words_en)} topics with {R} rounds each...")
     
